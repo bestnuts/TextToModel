@@ -9,7 +9,15 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.9.0';
+    const PLUGIN_VERSION = '0.10.1';
+    const LIGHT_OPTIONS = {
+        light_east: '오른쪽',
+        light_west: '왼쪽',
+        light_south: '앞',
+        light_north: '뒤',
+        light_up: '위',
+        light_down: '아래',
+    };
     const ARC_BULGE = 0.25;
     const BONE_TEXELS = 4;
     const BONE_AFFINE_TEXELS = 6;
@@ -710,13 +718,17 @@
         return Array.from(text, (char) => `\\u${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join('');
     }
 
+    function offsetByte(offset) {
+        return Math.round(Math.max(-1, Math.min(1, offset)) * 127);
+    }
+
     function headerFromForm(form) {
         const angleByte = (degrees) => Math.round((((degrees % 360) + 360) % 360) / 360 * 256) & 0xff;
         return {
             rotationMode: form.rotation_mode === 'spin' ? 1 : 0,
-            lightMask: 0b111111,
+            lightMask: Object.keys(LIGHT_OPTIONS).reduce((mask, name, bit) => (form[name] ? mask | (1 << bit) : mask), 0),
             ambient: Math.round(form.ambient * 255),
-            offset: [0, 0, 0],
+            offset: [offsetByte(form.offset_x), offsetByte(form.offset_y), 0],
             scale: Math.min(255, Math.round(form.scale * 128)),
             yaw: angleByte(form.yaw),
             pitch: angleByte(form.pitch),
@@ -887,6 +899,14 @@
         return options;
     }
 
+    function lightFields() {
+        const fields = {};
+        for (const [name, direction] of Object.entries(LIGHT_OPTIONS)) {
+            fields[name] = { label: `조명: ${direction}`, type: 'checkbox', value: true };
+        }
+        return fields;
+    }
+
     function openExportDialog() {
         const selectedClip = Animation.selected || Animation.all[0];
         new Dialog({
@@ -904,7 +924,10 @@
                 roll: { label: 'Roll (도)', type: 'number', value: 0 },
                 spin_seconds: { label: '1회전 시간 (초)', type: 'number', value: 8, min: 1 },
                 scale: { label: '스케일', type: 'number', value: 1, min: 0.01, step: 0.1 },
+                offset_x: { label: '로컬 오프셋 X', type: 'number', value: 0, min: -1, max: 1, step: 0.05 },
+                offset_y: { label: '로컬 오프셋 Y', type: 'number', value: 0, min: -1, max: 1, step: 0.05 },
                 ambient: { label: '주변광', type: 'number', value: 0.3, min: 0, max: 1, step: 0.05 },
+                ...lightFields(),
             },
             onConfirm(form) {
                 exportGlyph(form).catch((error) => {
@@ -932,6 +955,7 @@
             exportSummary,
             faceRecord,
             fontDefinition,
+            headerFromForm,
             buildAtlas,
             layoutSheet,
             normalizeBoxes,
