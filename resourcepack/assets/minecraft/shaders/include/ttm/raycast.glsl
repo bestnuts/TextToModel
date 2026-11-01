@@ -3,8 +3,6 @@
 
 #include <minecraft:ttm/format.glsl>
 
-// 이 파일을 불러오기 전에 ttmOrigin, ttmModel, ttmRotation, ttmAmbient 입력을 선언해야 한다.
-
 #define TTM_RAY_EPSILON 1e-6
 #define TTM_ALPHA_CUTOUT 0.1
 
@@ -33,7 +31,6 @@ vec3 ttmAxisNormal(vec3 tValues, float t, vec3 signs) {
     return vec3(0.0, 0.0, signs.z);
 }
 
-// 슬랩 테스트. 진입점과 진출점을 모두 돌려주어, 앞면이 비어 있으면 안쪽 면을 볼 수 있게 한다.
 bool ttmIntersectBox(vec3 origin, vec3 direction, vec3 halfSize, out float tNear, out vec3 normalNear, out float tFar, out vec3 normalFar) {
     vec3 safe = mix(direction, vec3(TTM_RAY_EPSILON), lessThan(abs(direction), vec3(TTM_RAY_EPSILON)));
     vec3 inverse = 1.0 / safe;
@@ -49,14 +46,12 @@ bool ttmIntersectBox(vec3 origin, vec3 direction, vec3 halfSize, out float tNear
     return tNear <= tFar && tFar >= 0.0;
 }
 
-// 면 순서: 동, 서, 상, 하, 남, 북
 int ttmFaceIndex(vec3 normal) {
     if (abs(normal.x) > 0.5) return normal.x > 0.0 ? 0 : 1;
     if (abs(normal.y) > 0.5) return normal.y > 0.0 ? 2 : 3;
     return normal.z > 0.0 ? 4 : 5;
 }
 
-// 면 위의 점을 마인크래프트 UV 방향의 0~1 좌표로 바꾼다.
 vec2 ttmFaceCoord(int face, vec3 point) {
     if (face == 0) return vec2(1.0 - point.z, 1.0 - point.y);
     if (face == 1) return vec2(point.z, 1.0 - point.y);
@@ -92,8 +87,6 @@ bool ttmSampleFace(ivec2 row, int faceMask, vec3 normal, vec3 point, vec3 halfSi
     return color.a >= TTM_ALPHA_CUTOUT;
 }
 
-// 켠 방향은 바닐라 면 밝기(상 1.0, 하 0.5, 남북 0.8, 동서 0.6), 끈 방향은 주변광 밝기를 쓴다.
-// 마스크 비트 순서: 동, 서, 남, 북, 상, 하
 float ttmShade(vec3 normal) {
     int mask = ttmModel.g;
     float east = (mask & 1) != 0 ? 0.6 : ttmAmbient;
@@ -120,7 +113,6 @@ bool ttmTraceCube(int index, vec3 rayOrigin, vec3 rayDirection, inout TtmHit hit
     vec3 center = vec3(ttmSnorm16(a.r, a.g), ttmSnorm16(a.b, a.a), ttmSnorm16(b.r, b.g));
     vec3 halfSize = vec3(ttmUnorm16(b.b, b.a), ttmUnorm16(c.r, c.g), ttmUnorm16(c.b, c.a));
 
-    // 회전을 읽기 전에 경계 구로 먼저 걸러낸다.
     vec3 toCenter = center - rayOrigin;
     float along = dot(toCenter, rayDirection);
     if (dot(toCenter, toCenter) - along * along > dot(halfSize, halfSize) * 1.001) return false;
@@ -152,7 +144,6 @@ bool ttmTraceCube(int index, vec3 rayOrigin, vec3 rayDirection, inout TtmHit hit
     return false;
 }
 
-// 직교 투영: 광선은 쿼드 앞에서 화면 안쪽으로 곧게 들어간다.
 bool ttmTrace(vec2 local, out vec4 color) {
     color = vec4(0.0);
     mat3 toModel = transpose(ttmRotation);

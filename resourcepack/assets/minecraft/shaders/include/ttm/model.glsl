@@ -27,7 +27,6 @@ mat3 ttmRotateZ(float angle) {
     return mat3(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0);
 }
 
-// 모델 공간에서 화면 공간으로 가는 회전.
 // GameTime 은 20분마다 0 으로 돌아오므로, 그 안에서 정수 바퀴를 돌아야 이음매가 없다.
 mat3 ttmModelRotation(ivec4 display, ivec4 rotation) {
     float yaw = float(rotation.r) / 256.0 * TTM_TAU;

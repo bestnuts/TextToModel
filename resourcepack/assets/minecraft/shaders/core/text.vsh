@@ -70,8 +70,7 @@ void main() {
     int ttmVertex;
     if (ttmDetect(UV0, ttmGlyphOrigin, ttmGlyphSize, ttmVertex)) {
 #ifdef IS_GUI
-        // 기본 그림자는 RGB 가 0.25 배로 들어온다.
-        if (max(Color.r, max(Color.g, Color.b)) >= 0.26) {
+        if (max(Color.r, max(Color.g, Color.b)) >= TTM_SHADOW_BRIGHTNESS) {
             ivec4 display = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_DISPLAY, 0));
             ivec4 offset = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_OFFSET, 0));
             ivec4 rotation = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_ROTATION, 0));

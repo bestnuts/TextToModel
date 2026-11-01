@@ -3,12 +3,9 @@
 
 #include <minecraft:ttm/format.glsl>
 
-// 모서리 번호 0~3 은 좌상, 좌하, 우하, 우상 순서다.
 const vec2 TTM_CORNER_LOCAL[4] = vec2[](vec2(-1.0, 1.0), vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0));
 
 // GUI 정점은 여러 draw 가 공유하는 버퍼에 쌓여 gl_VertexIndex 로는 모서리를 알 수 없다.
-// 그래서 코너 마커에 모서리 번호를 넣고, 모서리 텍셀만으로 글리프 크기와 원점을 복원한다.
-// 일반 글리프가 우연히 통과하지 않도록 코너 4개와 매직을 모두 확인한다.
 bool ttmDetect(vec2 uv, out ivec2 origin, out ivec2 size, out int vertex) {
     origin = ivec2(0);
     size = ivec2(0);
