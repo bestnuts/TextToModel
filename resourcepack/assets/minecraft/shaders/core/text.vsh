@@ -69,10 +69,10 @@ void main() {
 #endif
 
 #ifndef IS_GRAYSCALE
-    int ttmVertex = gl_VertexIndex % 4;
     ivec2 ttmOrigin;
     ivec2 ttmSize;
-    if (ttmDetect(UV0, ttmVertex, ttmOrigin, ttmSize)) {
+    int ttmVertex;
+    if (ttmDetect(UV0, ttmOrigin, ttmSize, ttmVertex)) {
 #ifdef IS_GUI
         // 기본 그림자는 RGB 가 0.25 배로 들어온다.
         if (max(Color.r, max(Color.g, Color.b)) >= 0.26) {
