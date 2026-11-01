@@ -2,9 +2,9 @@
   "providers": [
     {
       "type": "bitmap",
-      "file": "texttomodel:font/can.png",
+      "file": "texttomodel:font/can_eat.png",
       "height": 64,
-      "ascent": 48,
+      "ascent": 0,
       "chars": [
         ""
       ]
