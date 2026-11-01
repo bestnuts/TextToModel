@@ -9,7 +9,7 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.3.0';
+    const PLUGIN_VERSION = '0.4.0';
     const MAX_ATLAS_WIDTH = 255;
     const CUBE_TAG = 0xc1;
     const MARKER = 0x54;
@@ -573,6 +573,28 @@
         return path.split(/[\\/]/).pop().replace(/\.png$/i, '');
     }
 
+    function exportSummary(sheet) {
+        const lines = [`${sheet.grid}×${sheet.grid} 격자, 글리프 ${sheet.tileCount}개`, escapeText(sheet.text)];
+        if (sheet.peakCubes > TARGET_TILE_CUBES) {
+            lines.push(`칸당 큐브가 최대 ${sheet.peakCubes}개로 권장치 ${TARGET_TILE_CUBES}개를 넘어 프레임이 떨어질 수 있습니다.`);
+        }
+        return lines;
+    }
+
+    function showExportResult(sheet) {
+        new Dialog({
+            id: 'texttomodel_result',
+            title: 'TextToModel 내보내기 완료',
+            lines: exportSummary(sheet),
+            buttons: ['글리프 복사', '닫기'],
+            confirmIndex: 0,
+            cancelIndex: 1,
+            onButton(index) {
+                if (index === 0) Clipbench.setText(sheet.text);
+            },
+        }).show();
+    }
+
     function exportGlyph(form) {
         const name = (Project.name || 'model').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
         const sheet = collectSheet(form);
@@ -606,17 +628,7 @@
                         name: savedName,
                         content: JSON.stringify(font, null, 2),
                     },
-                    () => {
-                        const overTarget = sheet.peakCubes > TARGET_TILE_CUBES;
-                        if (sheet.grid === 1 && !overTarget) return;
-                        const warning = overTarget
-                            ? `\n\n칸당 큐브가 최대 ${sheet.peakCubes}개로 권장치 ${TARGET_TILE_CUBES}개를 넘어 프레임이 떨어질 수 있습니다.`
-                            : '';
-                        Blockbench.showMessageBox({
-                            title: 'TextToModel',
-                            message: `${sheet.grid}×${sheet.grid} 격자, 글리프 ${sheet.tileCount}개로 나눴습니다. 아래 문자열을 사용해 주세요.\n\n${escapeText(sheet.text)}${warning}`,
-                        });
-                    }
+                    () => showExportResult(sheet)
                 );
             }
         );
@@ -656,6 +668,7 @@
             encodeGlyph,
             encodePng,
             escapeText,
+            exportSummary,
             fontDefinition,
             buildAtlas,
             layoutSheet,
