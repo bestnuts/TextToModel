@@ -40,6 +40,7 @@ layout(location = 9) flat out ivec2 ttmTexelOrigin;
 layout(location = 10) flat out ivec4 ttmModel;
 layout(location = 11) flat out vec4 ttmPlacement;
 layout(location = 12) flat out float ttmAmbient;
+layout(location = 13) flat out ivec4 ttmTile;
 #endif
 
 void main() {
@@ -62,6 +63,7 @@ void main() {
     ttmModel = ivec4(0);
     ttmPlacement = vec4(0.0f, 0.0f, 0.0f, 1.0f);
     ttmAmbient = 0.0f;
+    ttmTile = ivec4(0);
 #endif
 
 #ifndef IS_GRAYSCALE
@@ -83,6 +85,7 @@ void main() {
             ttmModel = ivec4(counts.r, display.b, counts.b, counts.a);
             ttmPlacement = vec4(formatSnorm8(offset.r), formatSnorm8(offset.g), formatSnorm8(offset.b), float(offset.a) / 128.0f);
             ttmAmbient = float(display.a) / 255.0f;
+            ttmTile = formatWord(glyphOrigin + ivec2(TTM_HEADER_TILE, 0));
         } else {
             gl_Position = vec4(-2.0f, -2.0f, 0.0f, 1.0f);
         }

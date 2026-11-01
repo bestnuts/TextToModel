@@ -136,8 +136,18 @@ bool ttmTraceCube(int index, vec3 ws_rayOrigin, vec3 ws_rayDirection, inout TtmH
     return false;
 }
 
+bool ttmIsTileOwner(vec2 vs_quad) {
+    if (ttmTile.r == 0 || ttmTile.g == 0) return true;
+
+    vec2 coord = vs_quad * vec2(0.5f, -0.5f) + 0.5f;
+    ivec2 tile = ivec2(floor(coord * vec2(ttmTile.rg)));
+    return formatIsEqual(clamp(tile, ivec2(0), ttmTile.rg - 1), ttmTile.ba);
+}
+
 bool ttmTrace(vec2 vs_quad, out vec4 color) {
     color = vec4(0.0f);
+    if (!ttmIsTileOwner(vs_quad)) return false;
+
     mat3 viewToWorld = transpose(ttmWorldToView);
     vec3 ws_rayOrigin = viewToWorld * ((vec3(vs_quad, 2.0f) - ttmPlacement.xyz) / ttmPlacement.w);
     vec3 ws_rayDirection = viewToWorld * vec3(0.0f, 0.0f, -1.0f);
