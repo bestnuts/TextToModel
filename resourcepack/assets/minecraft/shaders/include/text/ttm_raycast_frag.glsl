@@ -153,7 +153,8 @@ TtmBonePose ttmReadBoneFrame(int bone, int frame) {
 TtmBonePose ttmReadBonePose(int bone) {
     TtmBonePose first = ttmReadBoneFrame(bone, ttmAnimation.r);
     TtmBonePose second = ttmReadBoneFrame(bone, ttmAnimation.g);
-    return TtmBonePose(normalize(mix(first.rotation, second.rotation, ttmFrameBlend)), mix(first.position, second.position, ttmFrameBlend));
+    vec4 target = dot(first.rotation, second.rotation) < 0.0f ? -second.rotation : second.rotation;
+    return TtmBonePose(normalize(mix(first.rotation, target, ttmFrameBlend)), mix(first.position, second.position, ttmFrameBlend));
 }
 
 bool ttmIsTileOwner(vec2 vs_quad) {

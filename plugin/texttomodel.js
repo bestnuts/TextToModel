@@ -9,7 +9,15 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.6.0';
+    const PLUGIN_VERSION = '0.7.0';
+    const BONE_TEXELS = 4;
+    const BONE_POSITION_RANGE = 2;
+    const CYCLE_SECONDS = 1200;
+    const MAX_CLIP_FRAMES = 250;
+    const MAX_CYCLE_LOOPS = 65535;
+    const PLAY_MODES = { loop: 0, hold: 1, once: 2 };
+    const POSE_EPSILON = 1e-5;
+    const SCALE_EPSILON = 1e-3;
     const MAX_ATLAS_WIDTH = 255;
     const CUBE_TAG = 0xc1;
     const MARKER = 0x54;
@@ -87,17 +95,137 @@
         return corners;
     }
 
-    function normalizeBoxes(boxes) {
-        const corners = boxes.flatMap(boxCorners);
-        const min = [0, 1, 2].map((axis) => Math.min(...corners.map((corner) => corner[axis])));
-        const max = [0, 1, 2].map((axis) => Math.max(...corners.map((corner) => corner[axis])));
-        const middle = min.map((value, i) => (value + max[i]) / 2);
-        const radius = Math.max(...corners.map((corner) => Math.hypot(...corner.map((value, i) => value - middle[i]))));
+    function posedCorners(boxes, clip) {
+        const corners = [];
+        for (const box of boxes) {
+            const rest = boxCorners(box);
+            if (!box.bone) {
+                corners.push(...rest);
+                continue;
+            }
+            for (const frame of clip.frames) {
+                const pose = frame[box.bone - 1];
+                for (const corner of rest) {
+                    corners.push(rotateVector(pose.quat, corner).map((value, i) => value + pose.position[i]));
+                }
+            }
+        }
+        return corners;
+    }
+
+    function modelBounds(boxes, clip = null) {
+        const corners = posedCorners(boxes, clip);
+        const middle = [0, 1, 2].map((axis) => {
+            let min = Infinity;
+            let max = -Infinity;
+            for (const corner of corners) {
+                min = Math.min(min, corner[axis]);
+                max = Math.max(max, corner[axis]);
+            }
+            return (min + max) / 2;
+        });
+        let radius = 0;
+        for (const corner of corners) {
+            radius = Math.max(radius, Math.hypot(...corner.map((value, i) => value - middle[i])));
+        }
+        return { middle, radius };
+    }
+
+    function normalizeBoxes(boxes, bounds = modelBounds(boxes)) {
+        const { middle, radius } = bounds;
         return boxes.map((box) => ({
+            ...box,
             center: box.center.map((value, i) => (value - middle[i]) / radius),
             half: box.half.map((value) => value / radius),
-            quat: box.quat,
         }));
+    }
+
+    function normalizeClip(clip, { middle, radius }) {
+        const normalizePose = (pose) => {
+            const moved = rotateVector(pose.quat, middle);
+            return { quat: pose.quat, position: pose.position.map((value, i) => (moved[i] - middle[i] + value) / radius) };
+        };
+        return { ...clip, frames: clip.frames.map((frame) => frame.map(normalizePose)) };
+    }
+
+    function boneTable(clip) {
+        const boneCount = clip.frames[0].length;
+        const width = boneCount * BONE_TEXELS;
+        const height = clip.frames.length;
+        if (width > MAX_ATLAS_WIDTH) throw new Error(`본은 최대 ${Math.floor(MAX_ATLAS_WIDTH / BONE_TEXELS)}개입니다. (현재 ${boneCount}개)`);
+
+        const pixels = new Uint8Array(width * height * 4);
+        clip.frames.forEach((frame, y) => {
+            frame.forEach((pose, bone) => {
+                const offset = (y * width + bone * BONE_TEXELS) * 4;
+                pose.quat.forEach((value, i) => writeSnorm16(pixels, offset + i * 2, value));
+                pose.position.forEach((value, i) => writeSnorm16(pixels, offset + 8 + i * 2, value / BONE_POSITION_RANGE));
+            });
+        });
+        return { width, height, pixels };
+    }
+
+    function clipTiming(length, fps, loopMode) {
+        const frameCount = Math.max(2, Math.min(MAX_CLIP_FRAMES, Math.round(length * fps)));
+        const divisions = loopMode === 'loop' ? frameCount : frameCount - 1;
+        return {
+            times: Array.from({ length: frameCount }, (_, frame) => (frame / divisions) * length),
+            loopsPerCycle: Math.max(1, Math.min(MAX_CYCLE_LOOPS, Math.round(CYCLE_SECONDS / length))),
+            playMode: PLAY_MODES[loopMode],
+        };
+    }
+
+    function multiplyMatrices(a, b) {
+        const result = new Array(16).fill(0);
+        for (let column = 0; column < 4; column++) {
+            for (let row = 0; row < 4; row++) {
+                for (let k = 0; k < 4; k++) result[column * 4 + row] += a[k * 4 + row] * b[column * 4 + k];
+            }
+        }
+        return result;
+    }
+
+    function invertRigid(m) {
+        const position = [
+            -(m[0] * m[12] + m[1] * m[13] + m[2] * m[14]),
+            -(m[4] * m[12] + m[5] * m[13] + m[6] * m[14]),
+            -(m[8] * m[12] + m[9] * m[13] + m[10] * m[14]),
+        ];
+        return [m[0], m[4], m[8], 0, m[1], m[5], m[9], 0, m[2], m[6], m[10], 0, ...position, 1];
+    }
+
+    function rotationToQuaternion(x, y, z) {
+        const trace = x[0] + y[1] + z[2];
+        if (trace > 0) {
+            const s = Math.sqrt(trace + 1) * 2;
+            return [(y[2] - z[1]) / s, (z[0] - x[2]) / s, (x[1] - y[0]) / s, s / 4];
+        }
+        if (x[0] > y[1] && x[0] > z[2]) {
+            const s = Math.sqrt(1 + x[0] - y[1] - z[2]) * 2;
+            return [s / 4, (y[0] + x[1]) / s, (z[0] + x[2]) / s, (y[2] - z[1]) / s];
+        }
+        if (y[1] > z[2]) {
+            const s = Math.sqrt(1 + y[1] - x[0] - z[2]) * 2;
+            return [(y[0] + x[1]) / s, s / 4, (z[1] + y[2]) / s, (z[0] - x[2]) / s];
+        }
+        const s = Math.sqrt(1 + z[2] - x[0] - y[1]) * 2;
+        return [(z[0] + x[2]) / s, (z[1] + y[2]) / s, s / 4, (x[1] - y[0]) / s];
+    }
+
+    function poseDelta(current, rest) {
+        const delta = multiplyMatrices(current, invertRigid(rest));
+        const columns = [delta.slice(0, 3), delta.slice(4, 7), delta.slice(8, 11)];
+        const scales = columns.map((column) => Math.hypot(...column));
+        const [x, y, z] = columns.map((column, i) => column.map((value) => value / scales[i]));
+        return {
+            quat: rotationToQuaternion(x, y, z),
+            position: delta.slice(12, 15),
+            scaled: scales.some((scale) => Math.abs(scale - 1) > SCALE_EPSILON),
+        };
+    }
+
+    function isRestPose(pose) {
+        return Math.abs(Math.abs(pose.quat[3]) - 1) < POSE_EPSILON && pose.position.every((value) => Math.abs(value) < POSE_EPSILON);
     }
 
     function writeSnorm16(bytes, offset, value) {
@@ -125,6 +253,7 @@
         const record = new Uint8Array(RECORD_WIDTH * 4);
         record[0] = CUBE_TAG;
         record[1] = cube.faces.reduce((mask, face, index) => (face ? mask | (1 << index) : mask), 0);
+        record[2] = cube.bone || 0;
 
         writeSnorm16(record, 4, cube.center[0]);
         writeSnorm16(record, 6, cube.center[1]);
@@ -169,6 +298,11 @@
         const textureY = texture.y === undefined ? 1 : texture.y;
         put(5, 0, [cubes.length, 0, textureX, textureY]);
         put(6, 0, [texture.width, texture.height, 0, 0]);
+        if (header.animation) {
+            const { boneCount, frameCount, loopsPerCycle, tableX, tableY, playMode } = header.animation;
+            put(8, 0, [boneCount, frameCount, loopsPerCycle >> 8, loopsPerCycle & 0xff]);
+            put(9, 0, [tableX, tableY, playMode, 0]);
+        }
         if (tile) {
             put(7, 0, tile);
             // 전진 폭은 오른쪽부터 알파가 있는 첫 열로 정해진다. 타일마다 폭이 달라지면 겹침이 어긋난다.
@@ -355,14 +489,16 @@
     }
 
     // 다른 페이지의 글리프 텍셀은 읽을 수 없어서 타일마다 쓰는 영역을 직접 가져야 한다.
-    function buildAtlas(cubes, textures) {
-        const rects = usedRects(cubes);
+    function buildAtlas(cubes, textures, table = null) {
+        const sources = table ? [...textures, table] : textures;
+        const tableRect = table && { source: textures.length, x: 0, y: 0, width: table.width, height: table.height };
+        const rects = table ? [...usedRects(cubes), tableRect] : usedRects(cubes);
         const layout = chooseAtlasLayout(rects, cubes.length);
         if (!layout) return null;
 
         const pixels = new Uint8Array(layout.width * layout.height * 4);
         pixels.stride = layout.width;
-        for (const { rect, x, y } of layout.placements) copyRect(pixels, textures[rect.source], rect, x, y);
+        for (const { rect, x, y } of layout.placements) copyRect(pixels, sources[rect.source], rect, x, y);
 
         const moveFace = (face) => {
             if (!face) return null;
@@ -372,10 +508,12 @@
             const offsetY = y - source.y;
             return { ...face, u0: face.u0 + offsetX, v0: face.v0 + offsetY, u1: face.u1 + offsetX, v1: face.v1 + offsetY };
         };
+        const tablePlacement = table && layout.placements.find((placement) => placement.rect === tableRect);
         return {
             cubes: cubes.map((cube) => ({ ...cube, faces: cube.faces.map(moveFace) })),
             texture: { x: layout.originX, y: layout.originY, width: layout.width, height: layout.height, pixels },
             size: layout.size,
+            tableOrigin: table && [layout.originX + tablePlacement.x, layout.originY + tablePlacement.y],
         };
     }
 
@@ -403,24 +541,46 @@
         return { width, height, pixels, charRows, spaceCodepoint, text: chars.join(String.fromCodePoint(spaceCodepoint)) };
     }
 
-    function buildGridSheet(cubes, textures, header, baseCodepoint, grid) {
+    function animationHeader(clip, atlas) {
+        return {
+            boneCount: clip.frames[0].length,
+            frameCount: clip.frames.length,
+            loopsPerCycle: clip.loopsPerCycle,
+            playMode: clip.playMode,
+            tableX: atlas.tableOrigin[0],
+            tableY: atlas.tableOrigin[1],
+        };
+    }
+
+    function buildGridSheet(cubes, textures, header, baseCodepoint, grid, clip = null) {
         const tiles = grid === 1 ? [{ x: 0, y: 0, cubes }] : assignTiles(cubes, header, grid).filter((tile) => tile.cubes.length > 0);
         if (tiles.length === 0) throw new Error('화면 안에 들어오는 큐브가 없습니다.');
 
-        const atlases = tiles.map((tile) => buildAtlas(tile.cubes, textures));
+        const table = clip && boneTable(clip);
+        const atlases = tiles.map((tile) => buildAtlas(tile.cubes, textures, table));
         if (atlases.includes(null)) return null;
 
         const size = Math.max(...atlases.map((atlas) => atlas.size));
         const peakCubes = Math.max(...tiles.map((tile) => tile.cubes.length));
         const tileInfo = (tile) => (grid === 1 ? null : [grid, grid, tile.x, tile.y]);
-        const glyphs = atlases.map((atlas, index) => encodeGlyph(atlas.cubes, atlas.texture, header, tileInfo(tiles[index]), size).pixels);
+        const glyphs = atlases.map((atlas, index) => {
+            const glyphHeader = clip ? { ...header, animation: animationHeader(clip, atlas) } : header;
+            return encodeGlyph(atlas.cubes, atlas.texture, glyphHeader, tileInfo(tiles[index]), size).pixels;
+        });
         if (grid > 1) return { ...layoutSheet(glyphs, size, baseCodepoint), grid, tileCount: tiles.length, peakCubes };
 
         const char = String.fromCodePoint(baseCodepoint);
         return { width: size, height: size, pixels: glyphs[0], charRows: [char], spaceCodepoint: null, text: char, grid, tileCount: 1, peakCubes };
     }
 
-    function buildSheet(cubes, textures, header, baseCodepoint) {
+    function buildSheet(unsortedCubes, textures, header, baseCodepoint, clip = null) {
+        const cubes = [...unsortedCubes].sort((a, b) => (a.bone || 0) - (b.bone || 0));
+        if (clip) {
+            const sheet = buildGridSheet(cubes, textures, header, baseCodepoint, 1, clip);
+            if (sheet) return sheet;
+            throw new Error('애니메이션 모델의 텍스처와 본 표가 글리프에 들어가지 않습니다. 샘플링 fps를 낮춰 보세요.');
+        }
+
         let triedGrid = false;
         for (const grid of rankTileGrids(cubes, header)) {
             triedGrid = true;
@@ -540,17 +700,63 @@
         return { source: sources.indexOf(texture), u0, v0, u1, v1, rotation: Math.round((face.rotation || 0) / 90) & 3 };
     }
 
+    function samplePoses(groups, animation, times) {
+        const worldMatrix = (group) => [...group.mesh.matrixWorld.elements];
+        const timelineTime = Timeline.time;
+        try {
+            Animator.showDefaultPose();
+            const rest = new Map(groups.map((group) => [group, worldMatrix(group)]));
+            return times.map((time) => {
+                Timeline.time = time;
+                Animator.showDefaultPose(true);
+                Animator.stackAnimations([animation], false);
+                Canvas.scene.updateMatrixWorld();
+                return groups.map((group) => poseDelta(worldMatrix(group), rest.get(group)));
+            });
+        } finally {
+            Timeline.time = timelineTime;
+            if (Modes.animate) Animator.preview();
+            else Animator.showDefaultPose();
+        }
+    }
+
+    function sampleClip(animation, fps) {
+        const timing = clipTiming(animation.length, fps, animation.loop);
+        const sampled = samplePoses(Group.all, animation, timing.times);
+        const movedIndices = Group.all.map((_, index) => index).filter((index) => sampled.some((frame) => !isRestPose(frame[index])));
+        return {
+            groups: movedIndices.map((index) => Group.all[index]),
+            frames: sampled.map((frame) => movedIndices.map((index) => frame[index])),
+            loopsPerCycle: timing.loopsPerCycle,
+            playMode: timing.playMode,
+            scaled: sampled.some((frame) => movedIndices.some((index) => frame[index].scaled)),
+        };
+    }
+
+    function collectClip(form) {
+        const animation = Animation.all.find((candidate) => candidate.uuid === form.clip);
+        if (!animation) return null;
+        if (animation.length <= 0) throw new Error('애니메이션 길이가 0입니다.');
+        const clip = sampleClip(animation, form.fps);
+        return clip.groups.length > 0 ? clip : null;
+    }
+
     function collectSheet(form) {
         const cubes = Cube.all.filter((cube) => cube.export && cube.visibility);
         if (cubes.length === 0) throw new Error('내보낼 큐브가 없습니다.');
 
         const sources = usedTextures(cubes);
-        const boxes = normalizeBoxes(cubes.map(worldBox));
+        const clip = collectClip(form);
+        const boneOf = (cube) => (clip ? clip.groups.indexOf(cube.parent) + 1 : 0);
+        const rawBoxes = cubes.map((cube) => ({ ...worldBox(cube), bone: boneOf(cube) }));
+        const bounds = modelBounds(rawBoxes, clip);
+        const boxes = normalizeBoxes(rawBoxes, bounds);
         const records = boxes.map((box, index) => ({
             ...box,
             faces: FACE_ORDER.map((name) => faceRecord(cubes[index].faces[name], sources)),
         }));
-        return buildSheet(records, sources.map(readTexture), headerFromForm(form), parseInt(form.codepoint, 16));
+        const sheet = buildSheet(records, sources.map(readTexture), headerFromForm(form), parseInt(form.codepoint, 16), clip && normalizeClip(clip, bounds));
+        return { ...sheet, clip };
     }
 
     function savedFileName(path) {
@@ -559,6 +765,8 @@
 
     function exportSummary(sheet) {
         const lines = [`${sheet.grid}×${sheet.grid} 격자, 글리프 ${sheet.tileCount}개`, escapeText(sheet.text)];
+        if (sheet.clip) lines.push(`본 ${sheet.clip.groups.length}개, ${sheet.clip.frames.length}프레임`);
+        if (sheet.clip && sheet.clip.scaled) lines.push('스케일 애니메이션은 지원하지 않아 무시했습니다.');
         if (sheet.peakCubes > TARGET_TILE_CUBES) {
             lines.push(`칸당 큐브가 최대 ${sheet.peakCubes}개로 권장치 ${TARGET_TILE_CUBES}개를 넘어 프레임이 떨어질 수 있습니다.`);
         }
@@ -618,7 +826,14 @@
         );
     }
 
+    function clipOptions() {
+        const options = { none: '없음' };
+        for (const animation of Animation.all) options[animation.uuid] = animation.name;
+        return options;
+    }
+
     function openExportDialog() {
+        const selectedClip = Animation.selected || Animation.all[0];
         new Dialog({
             id: 'texttomodel_export',
             title: `TextToModel 내보내기 (v${PLUGIN_VERSION})`,
@@ -626,7 +841,9 @@
                 codepoint: { label: '코드포인트 (16진수)', type: 'text', value: 'E000' },
                 height: { label: '표시 높이', type: 'number', value: 64, min: 1, step: 1 },
                 ascent: { label: 'Ascent', type: 'number', value: 48, step: 1 },
-                rotation_mode: { label: '회전', type: 'select', value: 'spin', options: { fixed: '고정', spin: 'Y축 자동 회전' } },
+                clip: { label: '애니메이션', type: 'select', value: selectedClip ? selectedClip.uuid : 'none', options: clipOptions() },
+                fps: { label: '샘플링 fps', type: 'number', value: 20, min: 1, max: 60, step: 1 },
+                rotation_mode: { label: '회전', type: 'select', value: selectedClip ? 'fixed' : 'spin', options: { fixed: '고정', spin: 'Y축 자동 회전' } },
                 yaw: { label: 'Yaw (도)', type: 'number', value: 45 },
                 pitch: { label: 'Pitch (도)', type: 'number', value: 22.5 },
                 roll: { label: 'Roll (도)', type: 'number', value: 0 },
@@ -645,6 +862,11 @@
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = {
             assignTiles,
+            boneTable,
+            clipTiming,
+            modelBounds,
+            normalizeClip,
+            poseDelta,
             buildSheet,
             chooseTileGrid,
             encodeGlyph,
