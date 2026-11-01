@@ -9,7 +9,8 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.8.0';
+    const PLUGIN_VERSION = '0.9.0';
+    const ARC_BULGE = 0.25;
     const BONE_TEXELS = 4;
     const BONE_AFFINE_TEXELS = 6;
     const BONE_FORMAT_RIGID = 0;
@@ -338,15 +339,19 @@
         return multiplyQuaternions(rollPitch, axisQuaternion(1, degrees(header.yaw) + spinDegrees));
     }
 
-    function viewBounds(cube, header, spinDegrees = 0) {
+    function pointBounds(points, header, spinDegrees) {
         const rotation = viewQuaternion(header, spinDegrees);
         const scale = header.scale / 128;
-        const points = boxCorners(cube).map((corner) =>
-            rotateVector(rotation, corner).map((value, axis) => value * scale + header.offset[axis] / 127)
+        const viewPoints = points.map((point) =>
+            rotateVector(rotation, point).map((value, axis) => value * scale + header.offset[axis] / 127)
         );
-        const xs = points.map((point) => point[0]);
-        const ys = points.map((point) => point[1]);
+        const xs = viewPoints.map((point) => point[0]);
+        const ys = viewPoints.map((point) => point[1]);
         return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+    }
+
+    function viewBounds(cube, header, spinDegrees = 0) {
+        return pointBounds(boxCorners(cube), header, spinDegrees);
     }
 
     function expandBounds(bounds, margin) {
@@ -358,15 +363,38 @@
         };
     }
 
-    // 회전 궤적은 고리 모양이다. 하나의 사각형으로 묶으면 궤적이 지나지 않는 가운데 칸까지 차지한다.
-    function cubeFootprints(cube, header) {
-        if (header.rotationMode !== SPIN_ROTATION) return [viewBounds(cube, header)];
+    function posedCubeCorners(cube, pose) {
+        const corners = boxCorners(cube);
+        if (!pose) return corners;
+        return corners.map((corner) => applyLinear(pose, corner).map((value, i) => value + pose.position[i]));
+    }
 
-        const orbitRadius = Math.hypot(cube.center[0], cube.center[2]) + Math.hypot(...cube.half);
-        const margin = (Math.PI / SPIN_SAMPLES) * orbitRadius * (header.scale / 128);
-        return Array.from({ length: SPIN_SAMPLES }, (_, step) =>
-            expandBounds(viewBounds(cube, header, (step / SPIN_SAMPLES) * 360), margin)
-        );
+    function largestDistance(points, others) {
+        return Math.max(...points.map((point, index) => Math.hypot(...point.map((value, axis) => value - others[index][axis]))));
+    }
+
+    // 회전 궤적은 고리 모양이다. 하나의 사각형으로 묶으면 궤적이 지나지 않는 가운데 칸까지 차지한다.
+    // 프레임 사이는 보간되므로 인접 프레임을 함께 묶고, 회전이 만드는 호의 불룩함만큼 여유를 둔다.
+    function cubeFootprints(cube, header, clip = null) {
+        const poses = clip && cube.bone ? clip.frames.map((frame) => frame[cube.bone - 1]) : [null];
+        const frames = poses.map((pose) => posedCubeCorners(cube, pose));
+        const wraps = !clip || clip.playMode === PLAY_MODES.loop;
+        const scale = header.scale / 128;
+
+        const isSpinning = header.rotationMode === SPIN_ROTATION;
+        const spins = isSpinning ? Array.from({ length: SPIN_SAMPLES }, (_, step) => (step / SPIN_SAMPLES) * 360) : [0];
+        const orbitRadius = isSpinning ? Math.max(...frames.flat().map((corner) => Math.hypot(corner[0], corner[2]))) : 0;
+        const spinMargin = (Math.PI / SPIN_SAMPLES) * orbitRadius * scale;
+
+        const footprints = [];
+        frames.forEach((corners, index) => {
+            const isLastFrame = index === frames.length - 1;
+            const nextCorners = isLastFrame && !wraps ? corners : frames[(index + 1) % frames.length];
+            const span = [...corners, ...nextCorners];
+            const margin = spinMargin + ARC_BULGE * largestDistance(corners, nextCorners) * scale;
+            for (const spin of spins) footprints.push(expandBounds(pointBounds(span, header, spin), margin));
+        });
+        return footprints;
     }
 
     function assignTiles(cubes, header, grid, footprints = cubes.map((cube) => cubeFootprints(cube, header))) {
@@ -393,8 +421,7 @@
         return tiles;
     }
 
-    function* rankTileGrids(cubes, header) {
-        const footprints = cubes.map((cube) => cubeFootprints(cube, header));
+    function* rankTileGrids(cubes, header, footprints) {
         const overTarget = [];
         for (let grid = 1; grid <= MAX_TILE_GRID; grid++) {
             const tiles = assignTiles(cubes, header, grid, footprints);
@@ -416,8 +443,9 @@
         return new Error(`큐브 ${cubes.length}개는 ${MAX_TILE_GRID}×${MAX_TILE_GRID} 격자로도 칸당 ${MAX_CUBES}개를 넘습니다.${advice}`);
     }
 
-    function chooseTileGrid(cubes, header) {
-        const { value: grid } = rankTileGrids(cubes, header).next();
+    function chooseTileGrid(cubes, header, clip = null) {
+        const footprints = cubes.map((cube) => cubeFootprints(cube, header, clip));
+        const { value: grid } = rankTileGrids(cubes, header, footprints).next();
         if (grid === undefined) throw cubeLimitError(cubes, header);
         return grid;
     }
@@ -556,31 +584,47 @@
         return { width, height, pixels, charRows, spaceCodepoint, text: chars.join(String.fromCodePoint(spaceCodepoint)) };
     }
 
+    function tileClip(cubes, clip) {
+        const usedBones = [...new Set(cubes.map((cube) => cube.bone || 0))].filter(Boolean).sort((a, b) => a - b);
+        const localBones = new Map(usedBones.map((bone, index) => [bone, index + 1]));
+        return {
+            cubes: cubes.map((cube) => (cube.bone ? { ...cube, bone: localBones.get(cube.bone) } : cube)),
+            clip: { ...clip, frames: clip.frames.map((frame) => usedBones.map((bone) => frame[bone - 1])) },
+        };
+    }
+
+    function prepareTile(tile, clip) {
+        if (!clip) return { cubes: tile.cubes, clip: null, table: null };
+        const local = tileClip(tile.cubes, clip);
+        return { ...local, table: local.clip.frames[0].length > 0 ? boneTable(local.clip) : null };
+    }
+
     function animationHeader(clip, atlas) {
+        const [tableX, tableY] = atlas.tableOrigin || [0, 0];
         return {
             boneCount: clip.frames[0].length,
             frameCount: clip.frames.length,
             loopsPerCycle: clip.loopsPerCycle,
             playMode: clip.playMode,
             boneFormat: clip.scaled ? BONE_FORMAT_AFFINE : BONE_FORMAT_RIGID,
-            tableX: atlas.tableOrigin[0],
-            tableY: atlas.tableOrigin[1],
+            tableX,
+            tableY,
         };
     }
 
-    function buildGridSheet(cubes, textures, header, baseCodepoint, grid, clip = null) {
-        const tiles = grid === 1 ? [{ x: 0, y: 0, cubes }] : assignTiles(cubes, header, grid).filter((tile) => tile.cubes.length > 0);
+    function buildGridSheet(cubes, textures, header, baseCodepoint, grid, footprints, clip) {
+        const tiles = grid === 1 ? [{ x: 0, y: 0, cubes }] : assignTiles(cubes, header, grid, footprints).filter((tile) => tile.cubes.length > 0);
         if (tiles.length === 0) throw new Error('화면 안에 들어오는 큐브가 없습니다.');
 
-        const table = clip && boneTable(clip);
-        const atlases = tiles.map((tile) => buildAtlas(tile.cubes, textures, table));
+        const prepared = tiles.map((tile) => prepareTile(tile, clip));
+        const atlases = prepared.map((tile) => buildAtlas(tile.cubes, textures, tile.table));
         if (atlases.includes(null)) return null;
 
         const size = Math.max(...atlases.map((atlas) => atlas.size));
         const peakCubes = Math.max(...tiles.map((tile) => tile.cubes.length));
         const tileInfo = (tile) => (grid === 1 ? null : [grid, grid, tile.x, tile.y]);
         const glyphs = atlases.map((atlas, index) => {
-            const glyphHeader = clip ? { ...header, animation: animationHeader(clip, atlas) } : header;
+            const glyphHeader = clip ? { ...header, animation: animationHeader(prepared[index].clip, atlas) } : header;
             return encodeGlyph(atlas.cubes, atlas.texture, glyphHeader, tileInfo(tiles[index]), size).pixels;
         });
         if (grid > 1) return { ...layoutSheet(glyphs, size, baseCodepoint), grid, tileCount: tiles.length, peakCubes };
@@ -591,20 +635,16 @@
 
     function buildSheet(unsortedCubes, textures, header, baseCodepoint, clip = null) {
         const cubes = [...unsortedCubes].sort((a, b) => (a.bone || 0) - (b.bone || 0));
-        if (clip) {
-            const sheet = buildGridSheet(cubes, textures, header, baseCodepoint, 1, clip);
-            if (sheet) return sheet;
-            throw new Error('애니메이션 모델의 텍스처와 본 표가 글리프에 들어가지 않습니다. 샘플링 fps를 낮춰 보세요.');
-        }
+        const footprints = cubes.map((cube) => cubeFootprints(cube, header, clip));
 
         let triedGrid = false;
-        for (const grid of rankTileGrids(cubes, header)) {
+        for (const grid of rankTileGrids(cubes, header, footprints)) {
             triedGrid = true;
-            const sheet = buildGridSheet(cubes, textures, header, baseCodepoint, grid);
+            const sheet = buildGridSheet(cubes, textures, header, baseCodepoint, grid, footprints, clip);
             if (sheet) return sheet;
         }
         if (!triedGrid) throw cubeLimitError(cubes, header);
-        throw new Error(`${MAX_TILE_GRID}×${MAX_TILE_GRID} 격자로도 칸 하나에 필요한 텍스처가 글리프에 들어가지 않습니다. 큰 면의 UV를 줄이거나 회전을 고정으로 바꿔 보세요.`);
+        throw new Error(`${MAX_TILE_GRID}×${MAX_TILE_GRID} 격자로도 칸 하나에 필요한 텍스처가 글리프에 들어가지 않습니다. 큰 면의 UV를 줄이거나, 회전을 고정으로 바꾸거나, 샘플링 fps를 낮춰 보세요.`);
     }
 
     function crc32(bytes) {
@@ -880,6 +920,7 @@
             boneTable,
             applyLinear,
             clipTiming,
+            cubeFootprints,
             modelBounds,
             normalizeClip,
             poseDelta,

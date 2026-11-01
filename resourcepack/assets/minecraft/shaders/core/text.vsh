@@ -95,7 +95,7 @@ void main() {
             ttmTile = formatWord(glyphOrigin + ivec2(TTM_HEADER_TILE, 0));
 
             ivec4 animation = formatWord(glyphOrigin + ivec2(TTM_HEADER_ANIMATION, 0));
-            if (animation.r > 0) {
+            if (animation.g > 0) {
                 ivec4 boneTable = formatWord(glyphOrigin + ivec2(TTM_HEADER_BONES, 0));
                 TtmPlayback playback = ttmResolvePlayback(Color, animation, boneTable.b);
                 ttmAnimation = ivec4(playback.frameA, playback.frameB, boneTable.r, boneTable.g);
