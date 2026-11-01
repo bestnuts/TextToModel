@@ -44,6 +44,7 @@ layout(location = 12) flat out float ttmAmbient;
 layout(location = 13) flat out ivec4 ttmTile;
 layout(location = 14) flat out ivec4 ttmAnimation;
 layout(location = 15) flat out float ttmFrameBlend;
+layout(location = 16) flat out int ttmBoneFormat;
 #endif
 
 void main() {
@@ -69,6 +70,7 @@ void main() {
     ttmTile = ivec4(0);
     ttmAnimation = ivec4(0);
     ttmFrameBlend = 0.0f;
+    ttmBoneFormat = 0;
 #endif
 
 #ifndef IS_GRAYSCALE
@@ -98,6 +100,7 @@ void main() {
                 TtmPlayback playback = ttmResolvePlayback(Color, animation, boneTable.b);
                 ttmAnimation = ivec4(playback.frameA, playback.frameB, boneTable.r, boneTable.g);
                 ttmFrameBlend = playback.blend;
+                ttmBoneFormat = boneTable.a;
                 if (playback.usesColorParameter) vertexColor = vec4(vec3(1.0f), Color.a);
                 if (playback.finished) gl_Position = TTM_HIDDEN_POSITION;
             }

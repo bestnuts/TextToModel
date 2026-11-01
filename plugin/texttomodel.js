@@ -9,9 +9,14 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.7.0';
+    const PLUGIN_VERSION = '0.8.0';
     const BONE_TEXELS = 4;
+    const BONE_AFFINE_TEXELS = 6;
+    const BONE_FORMAT_RIGID = 0;
+    const BONE_FORMAT_AFFINE = 1;
     const BONE_POSITION_RANGE = 2;
+    const BONE_LINEAR_RANGE = 8;
+    const IDENTITY_LINEAR = [1, 0, 0, 0, 1, 0, 0, 0, 1];
     const CYCLE_SECONDS = 1200;
     const MAX_CLIP_FRAMES = 250;
     const MAX_CYCLE_LOOPS = 65535;
@@ -95,6 +100,12 @@
         return corners;
     }
 
+    function applyLinear(pose, vector) {
+        if (!pose.linear) return rotateVector(pose.quat, vector);
+        const [x, y, z] = vector;
+        return [0, 1, 2].map((axis) => pose.linear[axis] * x + pose.linear[3 + axis] * y + pose.linear[6 + axis] * z);
+    }
+
     function posedCorners(boxes, clip) {
         const corners = [];
         for (const box of boxes) {
@@ -106,7 +117,7 @@
             for (const frame of clip.frames) {
                 const pose = frame[box.bone - 1];
                 for (const corner of rest) {
-                    corners.push(rotateVector(pose.quat, corner).map((value, i) => value + pose.position[i]));
+                    corners.push(applyLinear(pose, corner).map((value, i) => value + pose.position[i]));
                 }
             }
         }
@@ -142,24 +153,26 @@
 
     function normalizeClip(clip, { middle, radius }) {
         const normalizePose = (pose) => {
-            const moved = rotateVector(pose.quat, middle);
-            return { quat: pose.quat, position: pose.position.map((value, i) => (moved[i] - middle[i] + value) / radius) };
+            const moved = applyLinear(pose, middle);
+            return { ...pose, position: pose.position.map((value, i) => (moved[i] - middle[i] + value) / radius) };
         };
         return { ...clip, frames: clip.frames.map((frame) => frame.map(normalizePose)) };
     }
 
     function boneTable(clip) {
         const boneCount = clip.frames[0].length;
-        const width = boneCount * BONE_TEXELS;
+        const boneTexels = clip.scaled ? BONE_AFFINE_TEXELS : BONE_TEXELS;
+        const width = boneCount * boneTexels;
         const height = clip.frames.length;
-        if (width > MAX_ATLAS_WIDTH) throw new Error(`본은 최대 ${Math.floor(MAX_ATLAS_WIDTH / BONE_TEXELS)}개입니다. (현재 ${boneCount}개)`);
+        if (width > MAX_ATLAS_WIDTH) throw new Error(`본은 최대 ${Math.floor(MAX_ATLAS_WIDTH / boneTexels)}개입니다. (현재 ${boneCount}개)`);
 
         const pixels = new Uint8Array(width * height * 4);
         clip.frames.forEach((frame, y) => {
             frame.forEach((pose, bone) => {
-                const offset = (y * width + bone * BONE_TEXELS) * 4;
-                pose.quat.forEach((value, i) => writeSnorm16(pixels, offset + i * 2, value));
-                pose.position.forEach((value, i) => writeSnorm16(pixels, offset + 8 + i * 2, value / BONE_POSITION_RANGE));
+                const offset = (y * width + bone * boneTexels) * 4;
+                const linearValues = clip.scaled ? pose.linear.map((value) => value / BONE_LINEAR_RANGE) : pose.quat;
+                linearValues.forEach((value, i) => writeSnorm16(pixels, offset + i * 2, value));
+                pose.position.forEach((value, i) => writeSnorm16(pixels, offset + (linearValues.length + i) * 2, value / BONE_POSITION_RANGE));
             });
         });
         return { width, height, pixels };
@@ -216,16 +229,18 @@
         const delta = multiplyMatrices(current, invertRigid(rest));
         const columns = [delta.slice(0, 3), delta.slice(4, 7), delta.slice(8, 11)];
         const scales = columns.map((column) => Math.hypot(...column));
-        const [x, y, z] = columns.map((column, i) => column.map((value) => value / scales[i]));
+        const [x, y, z] = columns.map((column, i) => column.map((value) => value / (scales[i] || 1)));
         return {
             quat: rotationToQuaternion(x, y, z),
+            linear: columns.flat(),
             position: delta.slice(12, 15),
             scaled: scales.some((scale) => Math.abs(scale - 1) > SCALE_EPSILON),
         };
     }
 
     function isRestPose(pose) {
-        return Math.abs(Math.abs(pose.quat[3]) - 1) < POSE_EPSILON && pose.position.every((value) => Math.abs(value) < POSE_EPSILON);
+        const isIdentityLinear = pose.linear.every((value, i) => Math.abs(value - IDENTITY_LINEAR[i]) < POSE_EPSILON);
+        return isIdentityLinear && pose.position.every((value) => Math.abs(value) < POSE_EPSILON);
     }
 
     function writeSnorm16(bytes, offset, value) {
@@ -299,9 +314,9 @@
         put(5, 0, [cubes.length, 0, textureX, textureY]);
         put(6, 0, [texture.width, texture.height, 0, 0]);
         if (header.animation) {
-            const { boneCount, frameCount, loopsPerCycle, tableX, tableY, playMode } = header.animation;
+            const { boneCount, frameCount, loopsPerCycle, tableX, tableY, playMode, boneFormat } = header.animation;
             put(8, 0, [boneCount, frameCount, loopsPerCycle >> 8, loopsPerCycle & 0xff]);
-            put(9, 0, [tableX, tableY, playMode, 0]);
+            put(9, 0, [tableX, tableY, playMode, boneFormat]);
         }
         if (tile) {
             put(7, 0, tile);
@@ -547,6 +562,7 @@
             frameCount: clip.frames.length,
             loopsPerCycle: clip.loopsPerCycle,
             playMode: clip.playMode,
+            boneFormat: clip.scaled ? BONE_FORMAT_AFFINE : BONE_FORMAT_RIGID,
             tableX: atlas.tableOrigin[0],
             tableY: atlas.tableOrigin[1],
         };
@@ -766,7 +782,6 @@
     function exportSummary(sheet) {
         const lines = [`${sheet.grid}×${sheet.grid} 격자, 글리프 ${sheet.tileCount}개`, escapeText(sheet.text)];
         if (sheet.clip) lines.push(`본 ${sheet.clip.groups.length}개, ${sheet.clip.frames.length}프레임`);
-        if (sheet.clip && sheet.clip.scaled) lines.push('스케일 애니메이션은 지원하지 않아 무시했습니다.');
         if (sheet.peakCubes > TARGET_TILE_CUBES) {
             lines.push(`칸당 큐브가 최대 ${sheet.peakCubes}개로 권장치 ${TARGET_TILE_CUBES}개를 넘어 프레임이 떨어질 수 있습니다.`);
         }
@@ -863,6 +878,7 @@
         module.exports = {
             assignTiles,
             boneTable,
+            applyLinear,
             clipTiming,
             modelBounds,
             normalizeClip,

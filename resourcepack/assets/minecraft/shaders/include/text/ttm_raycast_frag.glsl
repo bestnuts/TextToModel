@@ -105,7 +105,7 @@ bool ttmTraceCube(ivec2 texelRow, ivec4 head, vec3 ws_rayOrigin, vec3 ws_rayDire
 
     vec3 ws_toCenter = ws_center - ws_rayOrigin;
     float along = dot(ws_toCenter, ws_rayDirection);
-    if (dot(ws_toCenter, ws_toCenter) - along * along > dot(halfSize, halfSize) * 1.001f) return false;
+    if (dot(ws_toCenter, ws_toCenter) - along * along / dot(ws_rayDirection, ws_rayDirection) > dot(halfSize, halfSize) * 1.001f) return false;
 
     ivec4 d = formatWord(texelRow + ivec2(4, 0));
     ivec4 e = formatWord(texelRow + ivec2(5, 0));
@@ -135,26 +135,68 @@ bool ttmTraceCube(ivec2 texelRow, ivec4 head, vec3 ws_rayOrigin, vec3 ws_rayDire
 }
 
 struct TtmBonePose {
+    mat3 inverseLinear;
+    vec3 position;
+    bool isVisible;
+};
+
+struct TtmRigidFrame {
     vec4 rotation;
     vec3 position;
 };
 
-TtmBonePose ttmReadBoneFrame(int bone, int frame) {
-    ivec2 texel = ttmAnimation.ba + ivec2((bone - 1) * TTM_BONE_TEXELS, frame);
+struct TtmAffineFrame {
+    mat3 linear;
+    vec3 position;
+};
+
+ivec2 ttmBoneTexel(int bone, int frame, int boneTexels) {
+    return ttmAnimation.ba + ivec2((bone - 1) * boneTexels, frame);
+}
+
+TtmRigidFrame ttmReadRigidFrame(int bone, int frame) {
+    ivec2 texel = ttmBoneTexel(bone, frame, TTM_BONE_TEXELS);
     ivec4 a = formatWord(texel);
     ivec4 b = formatWord(texel + ivec2(1, 0));
     ivec4 c = formatWord(texel + ivec2(2, 0));
     ivec4 d = formatWord(texel + ivec2(3, 0));
     vec4 rotation = vec4(formatSnorm16(a.r, a.g), formatSnorm16(a.b, a.a), formatSnorm16(b.r, b.g), formatSnorm16(b.b, b.a));
     vec3 position = vec3(formatSnorm16(c.r, c.g), formatSnorm16(c.b, c.a), formatSnorm16(d.r, d.g)) * TTM_BONE_POSITION_RANGE;
-    return TtmBonePose(rotation, position);
+    return TtmRigidFrame(rotation, position);
+}
+
+TtmAffineFrame ttmReadAffineFrame(int bone, int frame) {
+    ivec2 texel = ttmBoneTexel(bone, frame, TTM_BONE_AFFINE_TEXELS);
+    float values[12];
+    for (int i = 0; i < TTM_BONE_AFFINE_TEXELS; i++) {
+        ivec4 word = formatWord(texel + ivec2(i, 0));
+        values[i * 2] = formatSnorm16(word.r, word.g);
+        values[i * 2 + 1] = formatSnorm16(word.b, word.a);
+    }
+    mat3 linear = mat3(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8]) * TTM_BONE_LINEAR_RANGE;
+    return TtmAffineFrame(linear, vec3(values[9], values[10], values[11]) * TTM_BONE_POSITION_RANGE);
+}
+
+TtmBonePose ttmReadRigidPose(int bone) {
+    TtmRigidFrame first = ttmReadRigidFrame(bone, ttmAnimation.r);
+    TtmRigidFrame second = ttmReadRigidFrame(bone, ttmAnimation.g);
+    vec4 target = dot(first.rotation, second.rotation) < 0.0f ? -second.rotation : second.rotation;
+    vec4 rotation = normalize(mix(first.rotation, target, ttmFrameBlend));
+    mat3 linear = mat3(ttmRotate(rotation, vec3(1.0f, 0.0f, 0.0f)), ttmRotate(rotation, vec3(0.0f, 1.0f, 0.0f)), ttmRotate(rotation, vec3(0.0f, 0.0f, 1.0f)));
+    return TtmBonePose(transpose(linear), mix(first.position, second.position, ttmFrameBlend), true);
+}
+
+TtmBonePose ttmReadAffinePose(int bone) {
+    TtmAffineFrame first = ttmReadAffineFrame(bone, ttmAnimation.r);
+    TtmAffineFrame second = ttmReadAffineFrame(bone, ttmAnimation.g);
+    mat3 linear = first.linear * (1.0f - ttmFrameBlend) + second.linear * ttmFrameBlend;
+    vec3 position = mix(first.position, second.position, ttmFrameBlend);
+    if (abs(determinant(linear)) < TTM_BONE_MIN_DETERMINANT) return TtmBonePose(mat3(1.0f), position, false);
+    return TtmBonePose(inverse(linear), position, true);
 }
 
 TtmBonePose ttmReadBonePose(int bone) {
-    TtmBonePose first = ttmReadBoneFrame(bone, ttmAnimation.r);
-    TtmBonePose second = ttmReadBoneFrame(bone, ttmAnimation.g);
-    vec4 target = dot(first.rotation, second.rotation) < 0.0f ? -second.rotation : second.rotation;
-    return TtmBonePose(normalize(mix(first.rotation, target, ttmFrameBlend)), mix(first.position, second.position, ttmFrameBlend));
+    return ttmBoneFormat == TTM_BONE_FORMAT_AFFINE ? ttmReadAffinePose(bone) : ttmReadRigidPose(bone);
 }
 
 bool ttmIsTileOwner(vec2 vs_quad) {
@@ -176,7 +218,7 @@ bool ttmTrace(vec2 vs_quad, out vec4 color) {
     TtmHit hit = TtmHit(TTM_FAR_DISTANCE, vec4(0.0f), vec3(0.0f));
     bool found = false;
     int currentBone = 0;
-    TtmBonePose pose = TtmBonePose(vec4(0.0f, 0.0f, 0.0f, 1.0f), vec3(0.0f));
+    TtmBonePose pose = TtmBonePose(mat3(1.0f), vec3(0.0f), true);
     vec3 ws_boneOrigin = ws_rayOrigin;
     vec3 ws_boneDirection = ws_rayDirection;
 
@@ -186,14 +228,13 @@ bool ttmTrace(vec2 vs_quad, out vec4 color) {
 
         if (head.b != currentBone) {
             currentBone = head.b;
-            pose = currentBone == 0 ? TtmBonePose(vec4(0.0f, 0.0f, 0.0f, 1.0f), vec3(0.0f)) : ttmReadBonePose(currentBone);
-            vec4 conjugate = vec4(-pose.rotation.xyz, pose.rotation.w);
-            ws_boneOrigin = ttmRotate(conjugate, ws_rayOrigin - pose.position);
-            ws_boneDirection = ttmRotate(conjugate, ws_rayDirection);
+            pose = currentBone == 0 ? TtmBonePose(mat3(1.0f), vec3(0.0f), true) : ttmReadBonePose(currentBone);
+            ws_boneOrigin = pose.inverseLinear * (ws_rayOrigin - pose.position);
+            ws_boneDirection = pose.inverseLinear * ws_rayDirection;
         }
 
-        if (ttmTraceCube(texelRow, head, ws_boneOrigin, ws_boneDirection, hit)) {
-            hit.ws_normal = ttmRotate(pose.rotation, hit.ws_normal);
+        if (pose.isVisible && ttmTraceCube(texelRow, head, ws_boneOrigin, ws_boneDirection, hit)) {
+            hit.ws_normal = normalize(transpose(pose.inverseLinear) * hit.ws_normal);
             found = true;
         }
     }
