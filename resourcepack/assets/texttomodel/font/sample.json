@@ -6,6 +6,13 @@
       "height": 64,
       "ascent": 48,
       "chars": [""]
+    },
+    {
+      "type": "bitmap",
+      "file": "texttomodel:font/stress.png",
+      "height": 128,
+      "ascent": 96,
+      "chars": [""]
     }
   ]
 }

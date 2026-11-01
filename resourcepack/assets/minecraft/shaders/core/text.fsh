@@ -22,6 +22,10 @@ layout(location = 3) in vec2 texCoord0;
 layout(location = 4) flat in int ttmActive;
 layout(location = 5) in vec2 ttmLocal;
 layout(location = 6) flat in mat3 ttmRotation;
+layout(location = 9) flat in ivec2 ttmOrigin;
+layout(location = 10) flat in ivec4 ttmModel;
+layout(location = 11) flat in vec4 ttmPlacement;
+layout(location = 12) flat in float ttmAmbient;
 #include <minecraft:ttm/raycast.glsl>
 #endif
 
@@ -51,19 +55,11 @@ vec4 calculateFinalColor(vec4 color) {
 void main() {
     #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
     if (ttmActive == 1) {
-        // 직교 투영: 광선은 쿼드 앞에서 화면 안쪽으로 곧게 들어간다.
-        mat3 toModel = transpose(ttmRotation);
-        vec3 rayOrigin = toModel * vec3(ttmLocal, 2.0);
-        vec3 rayDirection = toModel * vec3(0.0, 0.0, -1.0);
-
-        float hitDistance;
-        vec3 hitNormal;
-        if (!ttmIntersectBox(rayOrigin, rayDirection, vec3(0.5), hitDistance, hitNormal)) {
+        vec4 modelColor;
+        if (!ttmTrace(ttmLocal, modelColor)) {
             discard;
         }
-
-        vec3 shaded = ttmDebugFaceColor(hitNormal) * ttmShade(ttmRotation * hitNormal);
-        fragColor = vec4(shaded, 1.0) * vertexColor * ColorModulator;
+        fragColor = modelColor * vertexColor * ColorModulator;
         return;
     }
     #endif
