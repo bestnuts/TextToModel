@@ -18,6 +18,11 @@ layout(location = 1) in float cylindricalVertexDistance;
 layout(location = 2) in vec4 vertexColor;
 layout(location = 3) in vec2 texCoord0;
 
+#if defined(IS_GUI) && !defined(IS_GRAYSCALE)
+layout(location = 4) flat in int ttmActive;
+layout(location = 5) in vec2 ttmLocal;
+#endif
+
 #ifndef OIT_ALPHA_ONLY
 layout(location = 0) out vec4 fragColor;
 #endif
@@ -42,6 +47,13 @@ vec4 calculateFinalColor(vec4 color) {
 }
 
 void main() {
+    #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
+    if (ttmActive == 1) {
+        fragColor = vec4(ttmLocal * 0.5 + 0.5, 0.25, 1.0) * vec4(1.0, 1.0, 1.0, vertexColor.a * ColorModulator.a);
+        return;
+    }
+    #endif
+
     #ifdef IS_GRAYSCALE
     vec4 texColor = texture(Sampler0, texCoord0).rrrr;
     #else
