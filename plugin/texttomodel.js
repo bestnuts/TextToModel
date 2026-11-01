@@ -9,7 +9,7 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.5.0';
+    const PLUGIN_VERSION = '0.6.0';
     const MAX_ATLAS_WIDTH = 255;
     const CUBE_TAG = 0xc1;
     const MARKER = 0x54;
@@ -442,16 +442,6 @@
         return ~crc >>> 0;
     }
 
-    function adler32(bytes) {
-        let a = 1;
-        let b = 0;
-        for (const byte of bytes) {
-            a = (a + byte) % 65521;
-            b = (b + a) % 65521;
-        }
-        return ((b << 16) | a) >>> 0;
-    }
-
     function concatBytes(chunks) {
         const result = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
         let offset = 0;
@@ -471,20 +461,13 @@
         return concatBytes([uint32(body.length), typed, uint32(crc32(typed))]);
     }
 
-    function zlibStored(bytes) {
-        const chunks = [Uint8Array.of(0x78, 0x01)];
-        for (let offset = 0; offset < bytes.length; offset += 0xffff) {
-            const length = Math.min(0xffff, bytes.length - offset);
-            const final = offset + length >= bytes.length ? 1 : 0;
-            chunks.push(Uint8Array.of(final, length & 0xff, length >> 8, ~length & 0xff, (~length >> 8) & 0xff));
-            chunks.push(bytes.subarray(offset, offset + length));
-        }
-        chunks.push(uint32(adler32(bytes)));
-        return concatBytes(chunks);
+    async function zlibCompress(bytes) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
     }
 
     // 캔버스 저장은 알파를 프리멀티플라이해 알파 0 텍셀의 RGB 를 지운다. 코너 마커가 그 RGB 에 들어 있다.
-    function encodePng(width, height, pixels) {
+    async function encodePng(width, height, pixels) {
         const stride = width * 4;
         const raw = new Uint8Array((stride + 1) * height);
         for (let y = 0; y < height; y++) {
@@ -494,7 +477,7 @@
         return concatBytes([
             Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
             pngChunk('IHDR', header),
-            pngChunk('IDAT', zlibStored(raw)),
+            pngChunk('IDAT', await zlibCompress(raw)),
             pngChunk('IEND', new Uint8Array(0)),
         ]);
     }
@@ -596,10 +579,10 @@
         }).show();
     }
 
-    function exportGlyph(form) {
+    async function exportGlyph(form) {
         const name = (Project.name || 'model').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
         const sheet = collectSheet(form);
-        const png = encodePng(sheet.width, sheet.height, sheet.pixels);
+        const png = await encodePng(sheet.width, sheet.height, sheet.pixels);
         const binary = Array.from(png, (byte) => String.fromCharCode(byte)).join('');
 
         Blockbench.export(
@@ -652,11 +635,9 @@
                 ambient: { label: '주변광', type: 'number', value: 0.3, min: 0, max: 1, step: 0.05 },
             },
             onConfirm(form) {
-                try {
-                    exportGlyph(form);
-                } catch (error) {
+                exportGlyph(form).catch((error) => {
                     Blockbench.showMessageBox({ title: 'TextToModel', message: error.message, icon: 'error' });
-                }
+                });
             },
         }).show();
     }
