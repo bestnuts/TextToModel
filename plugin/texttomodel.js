@@ -2,8 +2,15 @@
     const RECORD_WIDTH = 19;
     const MIN_GLYPH_SIZE = 32;
     const MAX_GLYPH_SIZE = 256;
-    const MAX_CUBES = 64;
-    const MAX_UV = 16383 / 64;
+    const MAX_CUBES = 254;
+    const TARGET_TILE_CUBES = 64;
+    const GRID_PEAK_TOLERANCE = 1.25;
+    const MAX_TILE_GRID = 16;
+    const TILE_MARGIN = 0.002;
+    const SPIN_SAMPLES = 64;
+    const SPIN_ROTATION = 1;
+    const PLUGIN_VERSION = '0.3.0';
+    const MAX_ATLAS_WIDTH = 255;
     const CUBE_TAG = 0xc1;
     const MARKER = 0x54;
     const VERSION = 1;
@@ -26,14 +33,16 @@
         ];
     }
 
+    function axisQuaternion(axis, degrees) {
+        const half = (degrees * Math.PI) / 360;
+        const q = [0, 0, 0, Math.cos(half)];
+        q[axis] = Math.sin(half);
+        return q;
+    }
+
     function quaternionFromEuler(degrees) {
-        const axis = (index) => {
-            const half = (degrees[index] * Math.PI) / 360;
-            const q = [0, 0, 0, Math.cos(half)];
-            q[index] = Math.sin(half);
-            return q;
-        };
-        return multiplyQuaternions(multiplyQuaternions(axis(2), axis(1)), axis(0));
+        const [x, y, z] = degrees.map((value, axis) => axisQuaternion(axis, value));
+        return multiplyQuaternions(multiplyQuaternions(z, y), x);
     }
 
     function pivotTransform(node) {
@@ -136,11 +145,14 @@
         return record;
     }
 
-    function encodeGlyph(cubes, texture, header) {
+    function glyphSize(cubeCount, texture, tiled) {
+        const width = RECORD_WIDTH + texture.width + (tiled ? 1 : 0);
+        return Math.max(MIN_GLYPH_SIZE, width, Math.max(cubeCount, texture.height) + 2);
+    }
+
+    function encodeGlyph(cubes, texture, header, tile = null, size = glyphSize(cubes.length, texture, tile !== null)) {
         if (cubes.length === 0) throw new Error('내보낼 큐브가 없습니다.');
         if (cubes.length > MAX_CUBES) throw new Error(`큐브는 최대 ${MAX_CUBES}개입니다. (현재 ${cubes.length}개)`);
-
-        const size = Math.max(MIN_GLYPH_SIZE, RECORD_WIDTH + texture.width, Math.max(cubes.length, texture.height) + 2);
         if (size > MAX_GLYPH_SIZE) throw new Error(`글리프가 ${MAX_GLYPH_SIZE}을 넘습니다. 텍스처를 줄여 주세요. (현재 ${size})`);
 
         const pixels = new Uint8Array(size * size * 4);
@@ -153,15 +165,269 @@
         put(2, 0, [header.rotationMode, 0, header.lightMask, header.ambient]);
         put(3, 0, [header.offset[0] & 0xff, header.offset[1] & 0xff, header.offset[2] & 0xff, header.scale]);
         put(4, 0, [header.yaw, header.pitch, header.roll, header.spin]);
-        put(5, 0, [cubes.length, 0, RECORD_WIDTH, 1]);
+        const textureX = texture.x === undefined ? RECORD_WIDTH : texture.x;
+        const textureY = texture.y === undefined ? 1 : texture.y;
+        put(5, 0, [cubes.length, 0, textureX, textureY]);
         put(6, 0, [texture.width, texture.height, 0, 0]);
+        if (tile) {
+            put(7, 0, tile);
+            // 전진 폭은 오른쪽부터 알파가 있는 첫 열로 정해진다. 타일마다 폭이 달라지면 겹침이 어긋난다.
+            put(size - 1, 1, [0, 0, 0, 255]);
+        }
 
         cubes.forEach((cube, index) => put(0, index + 1, cubeRecord(cube)));
         for (let y = 0; y < texture.height; y++) {
             const start = y * texture.width * 4;
-            put(RECORD_WIDTH, y + 1, texture.pixels.subarray(start, start + texture.width * 4));
+            put(textureX, textureY + y, texture.pixels.subarray(start, start + texture.width * 4));
         }
         return { size, pixels };
+    }
+
+    function viewQuaternion(header, spinDegrees = 0) {
+        const degrees = (angle) => (angle / 256) * 360;
+        const rollPitch = multiplyQuaternions(axisQuaternion(2, degrees(header.roll)), axisQuaternion(0, degrees(header.pitch)));
+        return multiplyQuaternions(rollPitch, axisQuaternion(1, degrees(header.yaw) + spinDegrees));
+    }
+
+    function viewBounds(cube, header, spinDegrees = 0) {
+        const rotation = viewQuaternion(header, spinDegrees);
+        const scale = header.scale / 128;
+        const points = boxCorners(cube).map((corner) =>
+            rotateVector(rotation, corner).map((value, axis) => value * scale + header.offset[axis] / 127)
+        );
+        const xs = points.map((point) => point[0]);
+        const ys = points.map((point) => point[1]);
+        return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+    }
+
+    function expandBounds(bounds, margin) {
+        return {
+            minX: bounds.minX - margin,
+            maxX: bounds.maxX + margin,
+            minY: bounds.minY - margin,
+            maxY: bounds.maxY + margin,
+        };
+    }
+
+    // 회전 궤적은 고리 모양이다. 하나의 사각형으로 묶으면 궤적이 지나지 않는 가운데 칸까지 차지한다.
+    function cubeFootprints(cube, header) {
+        if (header.rotationMode !== SPIN_ROTATION) return [viewBounds(cube, header)];
+
+        const orbitRadius = Math.hypot(cube.center[0], cube.center[2]) + Math.hypot(...cube.half);
+        const margin = (Math.PI / SPIN_SAMPLES) * orbitRadius * (header.scale / 128);
+        return Array.from({ length: SPIN_SAMPLES }, (_, step) =>
+            expandBounds(viewBounds(cube, header, (step / SPIN_SAMPLES) * 360), margin)
+        );
+    }
+
+    function assignTiles(cubes, header, grid, footprints = cubes.map((cube) => cubeFootprints(cube, header))) {
+        const tiles = [];
+        for (let y = 0; y < grid; y++) {
+            for (let x = 0; x < grid; x++) tiles.push({ x, y, cubes: [] });
+        }
+        const cell = (coord) => Math.max(0, Math.min(grid - 1, Math.floor(coord * grid)));
+
+        cubes.forEach((cube, index) => {
+            const covered = new Set();
+            for (const bounds of footprints[index]) {
+                if (bounds.maxX < -1 || bounds.minX > 1 || bounds.maxY < -1 || bounds.minY > 1) continue;
+                const left = cell((bounds.minX - TILE_MARGIN) * 0.5 + 0.5);
+                const right = cell((bounds.maxX + TILE_MARGIN) * 0.5 + 0.5);
+                const top = cell((bounds.maxY + TILE_MARGIN) * -0.5 + 0.5);
+                const bottom = cell((bounds.minY - TILE_MARGIN) * -0.5 + 0.5);
+                for (let y = top; y <= bottom; y++) {
+                    for (let x = left; x <= right; x++) covered.add(y * grid + x);
+                }
+            }
+            covered.forEach((tileIndex) => tiles[tileIndex].cubes.push(cube));
+        });
+        return tiles;
+    }
+
+    function* rankTileGrids(cubes, header) {
+        const footprints = cubes.map((cube) => cubeFootprints(cube, header));
+        const overTarget = [];
+        for (let grid = 1; grid <= MAX_TILE_GRID; grid++) {
+            const tiles = assignTiles(cubes, header, grid, footprints);
+            const peak = Math.max(...tiles.map((tile) => tile.cubes.length));
+            if (peak <= TARGET_TILE_CUBES) yield grid;
+            else if (peak <= MAX_CUBES) overTarget.push({ grid, peak });
+        }
+        if (overTarget.length === 0) return;
+
+        const lowestPeak = Math.min(...overTarget.map((candidate) => candidate.peak));
+        const acceptable = (candidate) => candidate.peak <= lowestPeak * GRID_PEAK_TOLERANCE;
+        const preferred = overTarget.filter(acceptable);
+        const remaining = overTarget.filter((candidate) => !acceptable(candidate)).sort((a, b) => a.peak - b.peak);
+        for (const candidate of [...preferred, ...remaining]) yield candidate.grid;
+    }
+
+    function cubeLimitError(cubes, header) {
+        const advice = header.rotationMode === SPIN_ROTATION ? ' 회전을 고정으로 바꿔 보세요.' : '';
+        return new Error(`큐브 ${cubes.length}개는 ${MAX_TILE_GRID}×${MAX_TILE_GRID} 격자로도 칸당 ${MAX_CUBES}개를 넘습니다.${advice}`);
+    }
+
+    function chooseTileGrid(cubes, header) {
+        const { value: grid } = rankTileGrids(cubes, header).next();
+        if (grid === undefined) throw cubeLimitError(cubes, header);
+        return grid;
+    }
+
+    function faceRect(face) {
+        const x = Math.floor(Math.min(face.u0, face.u1));
+        const y = Math.floor(Math.min(face.v0, face.v1));
+        const right = Math.ceil(Math.max(face.u0, face.u1));
+        const bottom = Math.ceil(Math.max(face.v0, face.v1));
+        return { x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) };
+    }
+
+    function rectContains(outer, inner) {
+        return (
+            outer.x <= inner.x &&
+            outer.y <= inner.y &&
+            outer.x + outer.width >= inner.x + inner.width &&
+            outer.y + outer.height >= inner.y + inner.height
+        );
+    }
+
+    function usedRects(cubes) {
+        const unique = new Map();
+        for (const cube of cubes) {
+            for (const face of cube.faces) {
+                if (!face) continue;
+                const rect = faceRect(face);
+                unique.set(`${rect.x},${rect.y},${rect.width},${rect.height}`, rect);
+            }
+        }
+        const largestFirst = [...unique.values()].sort((a, b) => b.width * b.height - a.width * a.height);
+        const kept = [];
+        for (const rect of largestFirst) {
+            if (!kept.some((outer) => rectContains(outer, rect))) kept.push(rect);
+        }
+        return kept;
+    }
+
+    function packShelves(rects, maxWidth, maxHeight) {
+        const tallestFirst = [...rects].sort((a, b) => b.height - a.height);
+        const placements = [];
+        let x = 0;
+        let y = 0;
+        let shelfHeight = 0;
+        let width = 0;
+        for (const rect of tallestFirst) {
+            if (rect.width > maxWidth) return null;
+            if (x + rect.width > maxWidth) {
+                x = 0;
+                y += shelfHeight;
+                shelfHeight = 0;
+            }
+            if (y + rect.height > maxHeight) return null;
+            placements.push({ rect, x, y });
+            x += rect.width;
+            width = Math.max(width, x);
+            shelfHeight = Math.max(shelfHeight, rect.height);
+        }
+        return { placements, width, height: y + shelfHeight };
+    }
+
+    function chooseAtlasLayout(rects, cubeCount) {
+        const beside = packShelves(rects, MAX_GLYPH_SIZE - RECORD_WIDTH - 1, MAX_GLYPH_SIZE - 2);
+        const below = packShelves(rects, MAX_ATLAS_WIDTH, MAX_GLYPH_SIZE - cubeCount - 2);
+        const layouts = [];
+        if (beside) {
+            const size = Math.max(MIN_GLYPH_SIZE, RECORD_WIDTH + beside.width + 1, Math.max(cubeCount, beside.height) + 2);
+            layouts.push({ ...beside, originX: RECORD_WIDTH, originY: 1, size });
+        }
+        if (below) {
+            const size = Math.max(MIN_GLYPH_SIZE, below.width, cubeCount + below.height + 2);
+            layouts.push({ ...below, originX: 0, originY: cubeCount + 1, size });
+        }
+        return layouts.sort((a, b) => a.size - b.size)[0] || null;
+    }
+
+    function copyRect(atlas, texture, rect, atlasX, atlasY) {
+        for (let row = 0; row < rect.height; row++) {
+            const start = ((rect.y + row) * texture.width + rect.x) * 4;
+            const line = texture.pixels.subarray(start, start + rect.width * 4);
+            atlas.set(line, ((atlasY + row) * atlas.stride + atlasX) * 4);
+        }
+    }
+
+    // 다른 페이지의 글리프 텍셀은 읽을 수 없어서 타일마다 쓰는 영역을 직접 가져야 한다.
+    function buildAtlas(cubes, texture) {
+        const rects = usedRects(cubes);
+        const layout = chooseAtlasLayout(rects, cubes.length);
+        if (!layout) return null;
+
+        const pixels = new Uint8Array(layout.width * layout.height * 4);
+        pixels.stride = layout.width;
+        for (const { rect, x, y } of layout.placements) copyRect(pixels, texture, rect, x, y);
+
+        const moveFace = (face) => {
+            if (!face) return null;
+            const rect = faceRect(face);
+            const { rect: source, x, y } = layout.placements.find((placement) => rectContains(placement.rect, rect));
+            const offsetX = x - source.x;
+            const offsetY = y - source.y;
+            return { ...face, u0: face.u0 + offsetX, v0: face.v0 + offsetY, u1: face.u1 + offsetX, v1: face.v1 + offsetY };
+        };
+        return {
+            cubes: cubes.map((cube) => ({ ...cube, faces: cube.faces.map(moveFace) })),
+            texture: { x: layout.originX, y: layout.originY, width: layout.width, height: layout.height, pixels },
+            size: layout.size,
+        };
+    }
+
+    function layoutSheet(glyphs, size, baseCodepoint) {
+        const columns = Math.ceil(Math.sqrt(glyphs.length));
+        const rows = Math.ceil(glyphs.length / columns);
+        const width = columns * size;
+        const height = rows * size;
+        const pixels = new Uint8Array(width * height * 4);
+        glyphs.forEach((glyph, index) => {
+            const cellX = (index % columns) * size;
+            const cellY = Math.floor(index / columns) * size;
+            for (let row = 0; row < size; row++) {
+                const line = glyph.subarray(row * size * 4, (row + 1) * size * 4);
+                pixels.set(line, ((cellY + row) * width + cellX) * 4);
+            }
+        });
+
+        const chars = glyphs.map((_, index) => String.fromCodePoint(baseCodepoint + index));
+        const charRows = [];
+        for (let row = 0; row < rows; row++) {
+            charRows.push(chars.slice(row * columns, (row + 1) * columns).join('').padEnd(columns, '\0'));
+        }
+        const spaceCodepoint = baseCodepoint + glyphs.length;
+        return { width, height, pixels, charRows, spaceCodepoint, text: chars.join(String.fromCodePoint(spaceCodepoint)) };
+    }
+
+    function buildGridSheet(cubes, texture, header, baseCodepoint, grid) {
+        const tiles = grid === 1 ? [{ x: 0, y: 0, cubes }] : assignTiles(cubes, header, grid).filter((tile) => tile.cubes.length > 0);
+        if (tiles.length === 0) throw new Error('화면 안에 들어오는 큐브가 없습니다.');
+
+        const atlases = tiles.map((tile) => buildAtlas(tile.cubes, texture));
+        if (atlases.includes(null)) return null;
+
+        const size = Math.max(...atlases.map((atlas) => atlas.size));
+        const peakCubes = Math.max(...tiles.map((tile) => tile.cubes.length));
+        const tileInfo = (tile) => (grid === 1 ? null : [grid, grid, tile.x, tile.y]);
+        const glyphs = atlases.map((atlas, index) => encodeGlyph(atlas.cubes, atlas.texture, header, tileInfo(tiles[index]), size).pixels);
+        if (grid > 1) return { ...layoutSheet(glyphs, size, baseCodepoint), grid, tileCount: tiles.length, peakCubes };
+
+        const char = String.fromCodePoint(baseCodepoint);
+        return { width: size, height: size, pixels: glyphs[0], charRows: [char], spaceCodepoint: null, text: char, grid, tileCount: 1, peakCubes };
+    }
+
+    function buildSheet(cubes, texture, header, baseCodepoint) {
+        let triedGrid = false;
+        for (const grid of rankTileGrids(cubes, header)) {
+            triedGrid = true;
+            const sheet = buildGridSheet(cubes, texture, header, baseCodepoint, grid);
+            if (sheet) return sheet;
+        }
+        if (!triedGrid) throw cubeLimitError(cubes, header);
+        throw new Error(`${MAX_TILE_GRID}×${MAX_TILE_GRID} 격자로도 칸 하나에 필요한 텍스처가 글리프에 들어가지 않습니다. 큰 면의 UV를 줄이거나 회전을 고정으로 바꿔 보세요.`);
     }
 
     function crc32(bytes) {
@@ -217,13 +483,13 @@
     }
 
     // 캔버스 저장은 알파를 프리멀티플라이해 알파 0 텍셀의 RGB 를 지운다. 코너 마커가 그 RGB 에 들어 있다.
-    function encodePng(size, pixels) {
-        const stride = size * 4;
-        const raw = new Uint8Array((stride + 1) * size);
-        for (let y = 0; y < size; y++) {
+    function encodePng(width, height, pixels) {
+        const stride = width * 4;
+        const raw = new Uint8Array((stride + 1) * height);
+        for (let y = 0; y < height; y++) {
             raw.set(pixels.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
         }
-        const header = concatBytes([uint32(size), uint32(size), Uint8Array.of(8, 6, 0, 0, 0)]);
+        const header = concatBytes([uint32(width), uint32(height), Uint8Array.of(8, 6, 0, 0, 0)]);
         return concatBytes([
             Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
             pngChunk('IHDR', header),
@@ -232,18 +498,16 @@
         ]);
     }
 
-    function fontDefinition(name, codepoint, height, ascent) {
-        return {
-            providers: [
-                {
-                    type: 'bitmap',
-                    file: `${FONT_NAMESPACE}:font/${name}.png`,
-                    height,
-                    ascent,
-                    chars: [String.fromCodePoint(codepoint)],
-                },
-            ],
-        };
+    function fontDefinition(name, charRows, height, ascent, spaceCodepoint) {
+        const providers = [{ type: 'bitmap', file: `${FONT_NAMESPACE}:font/${name}.png`, height, ascent, chars: charRows }];
+        if (spaceCodepoint !== null) {
+            providers.push({ type: 'space', advances: { [String.fromCodePoint(spaceCodepoint)]: -(height + 1) } });
+        }
+        return { providers };
+    }
+
+    function escapeText(text) {
+        return Array.from(text, (char) => `\\u${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join('');
     }
 
     function headerFromForm(form) {
@@ -286,13 +550,13 @@
         const scaleU = texture.width / texture.getUVWidth();
         const scaleV = texture.display_height / texture.getUVHeight();
         const [u0, v0, u1, v1] = [face.uv[0] * scaleU, face.uv[1] * scaleV, face.uv[2] * scaleU, face.uv[3] * scaleV];
-        if (Math.min(u0, v0, u1, v1) < 0 || Math.max(u0, v0, u1, v1) > MAX_UV) {
+        if (Math.min(u0, v0, u1, v1) < 0 || Math.max(u0, u1) > texture.width || Math.max(v0, v1) > texture.display_height) {
             throw new Error('텍스처 범위를 벗어난 UV가 있습니다.');
         }
         return { u0, v0, u1, v1, rotation: Math.round((face.rotation || 0) / 90) & 3 };
     }
 
-    function collectGlyph(form) {
+    function collectSheet(form) {
         const cubes = Cube.all.filter((cube) => cube.export && cube.visibility);
         if (cubes.length === 0) throw new Error('내보낼 큐브가 없습니다.');
 
@@ -302,7 +566,7 @@
             ...box,
             faces: FACE_ORDER.map((name) => faceRecord(cubes[index].faces[name], texture)),
         }));
-        return encodeGlyph(records, readTexture(texture), headerFromForm(form));
+        return buildSheet(records, readTexture(texture), headerFromForm(form), parseInt(form.codepoint, 16));
     }
 
     function savedFileName(path) {
@@ -311,8 +575,8 @@
 
     function exportGlyph(form) {
         const name = (Project.name || 'model').toLowerCase().replace(/[^a-z0-9_.-]/g, '_');
-        const { size, pixels } = collectGlyph(form);
-        const png = encodePng(size, pixels);
+        const sheet = collectSheet(form);
+        const png = encodePng(sheet.width, sheet.height, sheet.pixels);
         const binary = Array.from(png, (byte) => String.fromCharCode(byte)).join('');
 
         Blockbench.export(
@@ -333,14 +597,27 @@
                         icon: 'warning',
                     });
                 }
-                const font = fontDefinition(savedName, parseInt(form.codepoint, 16), form.height, form.ascent);
-                Blockbench.export({
-                    resource_id: 'texttomodel',
-                    type: 'TextToModel Font',
-                    extensions: ['json'],
-                    name: savedName,
-                    content: JSON.stringify(font, null, 2),
-                });
+                const font = fontDefinition(savedName, sheet.charRows, form.height, form.ascent, sheet.spaceCodepoint);
+                Blockbench.export(
+                    {
+                        resource_id: 'texttomodel',
+                        type: 'TextToModel Font',
+                        extensions: ['json'],
+                        name: savedName,
+                        content: JSON.stringify(font, null, 2),
+                    },
+                    () => {
+                        const overTarget = sheet.peakCubes > TARGET_TILE_CUBES;
+                        if (sheet.grid === 1 && !overTarget) return;
+                        const warning = overTarget
+                            ? `\n\n칸당 큐브가 최대 ${sheet.peakCubes}개로 권장치 ${TARGET_TILE_CUBES}개를 넘어 프레임이 떨어질 수 있습니다.`
+                            : '';
+                        Blockbench.showMessageBox({
+                            title: 'TextToModel',
+                            message: `${sheet.grid}×${sheet.grid} 격자, 글리프 ${sheet.tileCount}개로 나눴습니다. 아래 문자열을 사용해 주세요.\n\n${escapeText(sheet.text)}${warning}`,
+                        });
+                    }
+                );
             }
         );
     }
@@ -348,7 +625,7 @@
     function openExportDialog() {
         new Dialog({
             id: 'texttomodel_export',
-            title: 'TextToModel 내보내기',
+            title: `TextToModel 내보내기 (v${PLUGIN_VERSION})`,
             form: {
                 codepoint: { label: '코드포인트 (16진수)', type: 'text', value: 'E000' },
                 height: { label: '표시 높이', type: 'number', value: 64, min: 1, step: 1 },
@@ -372,7 +649,24 @@
     }
 
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = { encodeGlyph, encodePng, normalizeBoxes, worldBox, quaternionFromEuler, rotateVector, savedFileName, fontDefinition };
+        module.exports = {
+            assignTiles,
+            buildSheet,
+            chooseTileGrid,
+            encodeGlyph,
+            encodePng,
+            escapeText,
+            fontDefinition,
+            buildAtlas,
+            layoutSheet,
+            normalizeBoxes,
+            quaternionFromEuler,
+            rotateVector,
+            savedFileName,
+            viewBounds,
+            viewQuaternion,
+            worldBox,
+        };
     }
 
     if (typeof Plugin === 'undefined') return;
@@ -384,7 +678,7 @@
         author: 'bestnuts',
         description: 'Generic Model 큐브를 코어 셰이더용 텍스트 글리프로 내보냅니다.',
         icon: 'text_fields',
-        version: '0.1.0',
+        version: PLUGIN_VERSION,
         variant: 'desktop',
         min_version: '5.2.0',
         onload() {
