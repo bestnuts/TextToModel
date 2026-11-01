@@ -9,7 +9,7 @@
     const TILE_MARGIN = 0.002;
     const SPIN_SAMPLES = 64;
     const SPIN_ROTATION = 1;
-    const PLUGIN_VERSION = '0.4.0';
+    const PLUGIN_VERSION = '0.5.0';
     const MAX_ATLAS_WIDTH = 255;
     const CUBE_TAG = 0xc1;
     const MARKER = 0x54;
@@ -278,11 +278,12 @@
         const y = Math.floor(Math.min(face.v0, face.v1));
         const right = Math.ceil(Math.max(face.u0, face.u1));
         const bottom = Math.ceil(Math.max(face.v0, face.v1));
-        return { x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) };
+        return { source: face.source, x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) };
     }
 
     function rectContains(outer, inner) {
         return (
+            outer.source === inner.source &&
             outer.x <= inner.x &&
             outer.y <= inner.y &&
             outer.x + outer.width >= inner.x + inner.width &&
@@ -296,7 +297,7 @@
             for (const face of cube.faces) {
                 if (!face) continue;
                 const rect = faceRect(face);
-                unique.set(`${rect.x},${rect.y},${rect.width},${rect.height}`, rect);
+                unique.set(`${rect.source},${rect.x},${rect.y},${rect.width},${rect.height}`, rect);
             }
         }
         const largestFirst = [...unique.values()].sort((a, b) => b.width * b.height - a.width * a.height);
@@ -354,14 +355,14 @@
     }
 
     // 다른 페이지의 글리프 텍셀은 읽을 수 없어서 타일마다 쓰는 영역을 직접 가져야 한다.
-    function buildAtlas(cubes, texture) {
+    function buildAtlas(cubes, textures) {
         const rects = usedRects(cubes);
         const layout = chooseAtlasLayout(rects, cubes.length);
         if (!layout) return null;
 
         const pixels = new Uint8Array(layout.width * layout.height * 4);
         pixels.stride = layout.width;
-        for (const { rect, x, y } of layout.placements) copyRect(pixels, texture, rect, x, y);
+        for (const { rect, x, y } of layout.placements) copyRect(pixels, textures[rect.source], rect, x, y);
 
         const moveFace = (face) => {
             if (!face) return null;
@@ -402,11 +403,11 @@
         return { width, height, pixels, charRows, spaceCodepoint, text: chars.join(String.fromCodePoint(spaceCodepoint)) };
     }
 
-    function buildGridSheet(cubes, texture, header, baseCodepoint, grid) {
+    function buildGridSheet(cubes, textures, header, baseCodepoint, grid) {
         const tiles = grid === 1 ? [{ x: 0, y: 0, cubes }] : assignTiles(cubes, header, grid).filter((tile) => tile.cubes.length > 0);
         if (tiles.length === 0) throw new Error('화면 안에 들어오는 큐브가 없습니다.');
 
-        const atlases = tiles.map((tile) => buildAtlas(tile.cubes, texture));
+        const atlases = tiles.map((tile) => buildAtlas(tile.cubes, textures));
         if (atlases.includes(null)) return null;
 
         const size = Math.max(...atlases.map((atlas) => atlas.size));
@@ -419,11 +420,11 @@
         return { width: size, height: size, pixels: glyphs[0], charRows: [char], spaceCodepoint: null, text: char, grid, tileCount: 1, peakCubes };
     }
 
-    function buildSheet(cubes, texture, header, baseCodepoint) {
+    function buildSheet(cubes, textures, header, baseCodepoint) {
         let triedGrid = false;
         for (const grid of rankTileGrids(cubes, header)) {
             triedGrid = true;
-            const sheet = buildGridSheet(cubes, texture, header, baseCodepoint, grid);
+            const sheet = buildGridSheet(cubes, textures, header, baseCodepoint, grid);
             if (sheet) return sheet;
         }
         if (!triedGrid) throw cubeLimitError(cubes, header);
@@ -525,7 +526,7 @@
         };
     }
 
-    function usedTexture(cubes) {
+    function usedTextures(cubes) {
         const textures = new Set();
         for (const cube of cubes) {
             for (const name of FACE_ORDER) {
@@ -534,8 +535,7 @@
             }
         }
         if (textures.size === 0) throw new Error('큐브 면에 적용된 텍스처가 없습니다.');
-        if (textures.size > 1) throw new Error(`텍스처는 1장만 지원합니다. (현재 ${textures.size}장)`);
-        return [...textures][0];
+        return [...textures];
     }
 
     function readTexture(texture) {
@@ -545,28 +545,29 @@
         return { width, height, pixels: new Uint8Array(image.data.buffer) };
     }
 
-    function faceRecord(face, texture) {
-        if (!face.getTexture()) return null;
+    function faceRecord(face, sources) {
+        const texture = face.getTexture();
+        if (!texture) return null;
         const scaleU = texture.width / texture.getUVWidth();
         const scaleV = texture.display_height / texture.getUVHeight();
         const [u0, v0, u1, v1] = [face.uv[0] * scaleU, face.uv[1] * scaleV, face.uv[2] * scaleU, face.uv[3] * scaleV];
         if (Math.min(u0, v0, u1, v1) < 0 || Math.max(u0, u1) > texture.width || Math.max(v0, v1) > texture.display_height) {
             throw new Error('텍스처 범위를 벗어난 UV가 있습니다.');
         }
-        return { u0, v0, u1, v1, rotation: Math.round((face.rotation || 0) / 90) & 3 };
+        return { source: sources.indexOf(texture), u0, v0, u1, v1, rotation: Math.round((face.rotation || 0) / 90) & 3 };
     }
 
     function collectSheet(form) {
         const cubes = Cube.all.filter((cube) => cube.export && cube.visibility);
         if (cubes.length === 0) throw new Error('내보낼 큐브가 없습니다.');
 
-        const texture = usedTexture(cubes);
+        const sources = usedTextures(cubes);
         const boxes = normalizeBoxes(cubes.map(worldBox));
         const records = boxes.map((box, index) => ({
             ...box,
-            faces: FACE_ORDER.map((name) => faceRecord(cubes[index].faces[name], texture)),
+            faces: FACE_ORDER.map((name) => faceRecord(cubes[index].faces[name], sources)),
         }));
-        return buildSheet(records, readTexture(texture), headerFromForm(form), parseInt(form.codepoint, 16));
+        return buildSheet(records, sources.map(readTexture), headerFromForm(form), parseInt(form.codepoint, 16));
     }
 
     function savedFileName(path) {
@@ -669,6 +670,7 @@
             encodePng,
             escapeText,
             exportSummary,
+            faceRecord,
             fontDefinition,
             buildAtlas,
             layoutSheet,
