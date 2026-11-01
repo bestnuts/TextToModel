@@ -32,13 +32,14 @@
 
 | 함수 | 동작 |
 | --- | --- |
-| `texttomodel:print_color` | 지금 시작하는 색과 그 색을 입힌 텍스트를 채팅에 출력. 색을 클릭하면 복사 |
+| `texttomodel:title_color` | 지금 시작하는 색을 입힌 텍스트를 실행자의 타이틀에 출력 |
+| `texttomodel:tellraw_color` | 지금 시작하는 색을 입힌 텍스트를 실행자의 채팅에 출력 |
 | `texttomodel:start_color` | 출력 없이 저장소 `texttomodel:play`의 `color`에 기록 |
 
-`print_color`는 출력할 글리프와 폰트를 함께 받습니다.
+`title_color`와 `tellraw_color`는 출력할 글리프와 폰트를 함께 받습니다. 계산된 색은 `/data get storage texttomodel:play color`로 확인합니다.
 
 ```mcfunction
-/function texttomodel:print_color {text:"",font:"texttomodel:sample"}
+/function texttomodel:title_color {text:"\uE020",font:"texttomodel:sample"}
 ```
 
 다른 함수에서 쓸 때는 매크로로 색을 넘깁니다.
@@ -49,7 +50,7 @@ function texttomodel:start_color
 function mypack:show with storage texttomodel:play
 
 # mypack:show
-$title @a title {text:"",font:"texttomodel:sample",color:"$(color)"}
+$title @a title {text:"\uE020",font:"texttomodel:sample",color:"$(color)"}
 ```
 
 ## 주의사항
