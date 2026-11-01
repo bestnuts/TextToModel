@@ -27,16 +27,16 @@ layout(location = 3) out vec2 texCoord0;
 
 #ifndef IS_GRAYSCALE
 uniform sampler2D Sampler0;
-#include <minecraft:ttm/detect.glsl>
+#include <minecraft:text/ttm_detect_vert.glsl>
 #endif
 
 #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
 #include <minecraft:globals.glsl>
-#include <minecraft:ttm/model.glsl>
+#include <minecraft:text/ttm_model_vert.glsl>
 layout(location = 4) flat out int ttmActive;
-layout(location = 5) out vec2 ttmLocal;
-layout(location = 6) flat out mat3 ttmRotation;
-layout(location = 9) flat out ivec2 ttmOrigin;
+layout(location = 5) out vec2 vs_ttmQuad;
+layout(location = 6) flat out mat3 ttmWorldToView;
+layout(location = 9) flat out ivec2 ttmTexelOrigin;
 layout(location = 10) flat out ivec4 ttmModel;
 layout(location = 11) flat out vec4 ttmPlacement;
 layout(location = 12) flat out float ttmAmbient;
@@ -56,38 +56,38 @@ void main() {
 
 #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
     ttmActive = 0;
-    ttmLocal = vec2(0.0);
-    ttmRotation = mat3(1.0);
-    ttmOrigin = ivec2(0);
+    vs_ttmQuad = vec2(0.0f);
+    ttmWorldToView = mat3(1.0f);
+    ttmTexelOrigin = ivec2(0);
     ttmModel = ivec4(0);
-    ttmPlacement = vec4(0.0, 0.0, 0.0, 1.0);
-    ttmAmbient = 0.0;
+    ttmPlacement = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ttmAmbient = 0.0f;
 #endif
 
 #ifndef IS_GRAYSCALE
-    ivec2 ttmGlyphOrigin;
-    ivec2 ttmGlyphSize;
-    int ttmVertex;
-    if (ttmDetect(UV0, ttmGlyphOrigin, ttmGlyphSize, ttmVertex)) {
+    ivec2 glyphOrigin;
+    ivec2 glyphSize;
+    int cornerIndex;
+    if (ttmDetect(UV0, glyphOrigin, glyphSize, cornerIndex)) {
 #ifdef IS_GUI
         if (max(Color.r, max(Color.g, Color.b)) >= TTM_SHADOW_BRIGHTNESS) {
-            ivec4 display = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_DISPLAY, 0));
-            ivec4 offset = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_OFFSET, 0));
-            ivec4 rotation = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_ROTATION, 0));
-            ivec4 counts = ttmWord(ttmGlyphOrigin + ivec2(TTM_HEADER_COUNTS, 0));
+            ivec4 display = formatWord(glyphOrigin + ivec2(TTM_HEADER_DISPLAY, 0));
+            ivec4 offset = formatWord(glyphOrigin + ivec2(TTM_HEADER_OFFSET, 0));
+            ivec4 rotation = formatWord(glyphOrigin + ivec2(TTM_HEADER_ROTATION, 0));
+            ivec4 counts = formatWord(glyphOrigin + ivec2(TTM_HEADER_COUNTS, 0));
 
             ttmActive = 1;
-            ttmLocal = TTM_CORNER_LOCAL[ttmVertex];
-            ttmRotation = ttmModelRotation(display, rotation);
-            ttmOrigin = ttmGlyphOrigin;
+            vs_ttmQuad = TTM_CORNER_QUAD[cornerIndex];
+            ttmWorldToView = ttmWorldToViewRotation(display, rotation);
+            ttmTexelOrigin = glyphOrigin;
             ttmModel = ivec4(counts.r, display.b, counts.b, counts.a);
-            ttmPlacement = vec4(ttmSnorm8(offset.r), ttmSnorm8(offset.g), ttmSnorm8(offset.b), float(offset.a) / 128.0);
-            ttmAmbient = float(display.a) / 255.0;
+            ttmPlacement = vec4(formatSnorm8(offset.r), formatSnorm8(offset.g), formatSnorm8(offset.b), float(offset.a) / 128.0f);
+            ttmAmbient = float(display.a) / 255.0f;
         } else {
-            gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+            gl_Position = vec4(-2.0f, -2.0f, 0.0f, 1.0f);
         }
 #else
-        gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+        gl_Position = vec4(-2.0f, -2.0f, 0.0f, 1.0f);
 #endif
     }
 #endif

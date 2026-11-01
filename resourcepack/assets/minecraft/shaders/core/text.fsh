@@ -20,13 +20,13 @@ layout(location = 3) in vec2 texCoord0;
 
 #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
 layout(location = 4) flat in int ttmActive;
-layout(location = 5) in vec2 ttmLocal;
-layout(location = 6) flat in mat3 ttmRotation;
-layout(location = 9) flat in ivec2 ttmOrigin;
+layout(location = 5) in vec2 vs_ttmQuad;
+layout(location = 6) flat in mat3 ttmWorldToView;
+layout(location = 9) flat in ivec2 ttmTexelOrigin;
 layout(location = 10) flat in ivec4 ttmModel;
 layout(location = 11) flat in vec4 ttmPlacement;
 layout(location = 12) flat in float ttmAmbient;
-#include <minecraft:ttm/raycast.glsl>
+#include <minecraft:text/ttm_raycast_frag.glsl>
 #endif
 
 #ifndef OIT_ALPHA_ONLY
@@ -56,7 +56,7 @@ void main() {
     #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
     if (ttmActive == 1) {
         vec4 modelColor;
-        if (!ttmTrace(ttmLocal, modelColor)) {
+        if (!ttmTrace(vs_ttmQuad, modelColor)) {
             discard;
         }
         fragColor = modelColor * vertexColor * ColorModulator;
