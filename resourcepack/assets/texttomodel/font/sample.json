@@ -29,6 +29,13 @@
       "chars": ["", ""]
     },
     {
+      "type": "bitmap",
+      "file": "texttomodel:font/anim.png",
+      "height": 96,
+      "ascent": 72,
+      "chars": [""]
+    },
+    {
       "type": "space",
       "advances": { "": -129 }
     }
