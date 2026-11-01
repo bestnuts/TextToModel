@@ -33,6 +33,7 @@ uniform sampler2D Sampler0;
 #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
 #include <minecraft:globals.glsl>
 #include <minecraft:text/ttm_model_vert.glsl>
+#include <minecraft:text/ttm_playback_vert.glsl>
 layout(location = 4) flat out int ttmActive;
 layout(location = 5) out vec2 vs_ttmQuad;
 layout(location = 6) flat out mat3 ttmWorldToView;
@@ -41,6 +42,8 @@ layout(location = 10) flat out ivec4 ttmModel;
 layout(location = 11) flat out vec4 ttmPlacement;
 layout(location = 12) flat out float ttmAmbient;
 layout(location = 13) flat out ivec4 ttmTile;
+layout(location = 14) flat out ivec4 ttmAnimation;
+layout(location = 15) flat out float ttmFrameBlend;
 #endif
 
 void main() {
@@ -64,6 +67,8 @@ void main() {
     ttmPlacement = vec4(0.0f, 0.0f, 0.0f, 1.0f);
     ttmAmbient = 0.0f;
     ttmTile = ivec4(0);
+    ttmAnimation = ivec4(0);
+    ttmFrameBlend = 0.0f;
 #endif
 
 #ifndef IS_GRAYSCALE
@@ -86,11 +91,21 @@ void main() {
             ttmPlacement = vec4(formatSnorm8(offset.r), formatSnorm8(offset.g), formatSnorm8(offset.b), float(offset.a) / 128.0f);
             ttmAmbient = float(display.a) / 255.0f;
             ttmTile = formatWord(glyphOrigin + ivec2(TTM_HEADER_TILE, 0));
+
+            ivec4 animation = formatWord(glyphOrigin + ivec2(TTM_HEADER_ANIMATION, 0));
+            if (animation.r > 0) {
+                ivec4 boneTable = formatWord(glyphOrigin + ivec2(TTM_HEADER_BONES, 0));
+                TtmPlayback playback = ttmResolvePlayback(Color, animation, boneTable.b);
+                ttmAnimation = ivec4(playback.frameA, playback.frameB, boneTable.r, boneTable.g);
+                ttmFrameBlend = playback.blend;
+                if (playback.usesColorParameter) vertexColor = vec4(vec3(1.0f), Color.a);
+                if (playback.finished) gl_Position = TTM_HIDDEN_POSITION;
+            }
         } else {
-            gl_Position = vec4(-2.0f, -2.0f, 0.0f, 1.0f);
+            gl_Position = TTM_HIDDEN_POSITION;
         }
 #else
-        gl_Position = vec4(-2.0f, -2.0f, 0.0f, 1.0f);
+        gl_Position = TTM_HIDDEN_POSITION;
 #endif
     }
 #endif

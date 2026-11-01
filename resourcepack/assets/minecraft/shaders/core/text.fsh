@@ -27,6 +27,8 @@ layout(location = 10) flat in ivec4 ttmModel;
 layout(location = 11) flat in vec4 ttmPlacement;
 layout(location = 12) flat in float ttmAmbient;
 layout(location = 13) flat in ivec4 ttmTile;
+layout(location = 14) flat in ivec4 ttmAnimation;
+layout(location = 15) flat in float ttmFrameBlend;
 #include <minecraft:text/ttm_raycast_frag.glsl>
 #endif
 

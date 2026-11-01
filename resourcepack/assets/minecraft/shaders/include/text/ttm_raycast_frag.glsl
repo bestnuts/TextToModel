@@ -94,9 +94,7 @@ float ttmShade(vec3 vs_normal) {
         + weight.y * (vs_normal.y > 0.0f ? up : down);
 }
 
-bool ttmTraceCube(int index, vec3 ws_rayOrigin, vec3 ws_rayDirection, inout TtmHit hit) {
-    ivec2 texelRow = ttmTexelOrigin + ivec2(0, index + 1);
-    ivec4 head = formatWord(texelRow);
+bool ttmTraceCube(ivec2 texelRow, ivec4 head, vec3 ws_rayOrigin, vec3 ws_rayDirection, inout TtmHit hit) {
     if (head.r != TTM_CUBE_TAG) return false;
 
     ivec4 a = formatWord(texelRow + ivec2(1, 0));
@@ -136,6 +134,28 @@ bool ttmTraceCube(int index, vec3 ws_rayOrigin, vec3 ws_rayDirection, inout TtmH
     return false;
 }
 
+struct TtmBonePose {
+    vec4 rotation;
+    vec3 position;
+};
+
+TtmBonePose ttmReadBoneFrame(int bone, int frame) {
+    ivec2 texel = ttmAnimation.ba + ivec2((bone - 1) * TTM_BONE_TEXELS, frame);
+    ivec4 a = formatWord(texel);
+    ivec4 b = formatWord(texel + ivec2(1, 0));
+    ivec4 c = formatWord(texel + ivec2(2, 0));
+    ivec4 d = formatWord(texel + ivec2(3, 0));
+    vec4 rotation = vec4(formatSnorm16(a.r, a.g), formatSnorm16(a.b, a.a), formatSnorm16(b.r, b.g), formatSnorm16(b.b, b.a));
+    vec3 position = vec3(formatSnorm16(c.r, c.g), formatSnorm16(c.b, c.a), formatSnorm16(d.r, d.g)) * TTM_BONE_POSITION_RANGE;
+    return TtmBonePose(rotation, position);
+}
+
+TtmBonePose ttmReadBonePose(int bone) {
+    TtmBonePose first = ttmReadBoneFrame(bone, ttmAnimation.r);
+    TtmBonePose second = ttmReadBoneFrame(bone, ttmAnimation.g);
+    return TtmBonePose(normalize(mix(first.rotation, second.rotation, ttmFrameBlend)), mix(first.position, second.position, ttmFrameBlend));
+}
+
 bool ttmIsTileOwner(vec2 vs_quad) {
     if (ttmTile.r == 0 || ttmTile.g == 0) return true;
 
@@ -154,8 +174,27 @@ bool ttmTrace(vec2 vs_quad, out vec4 color) {
 
     TtmHit hit = TtmHit(TTM_FAR_DISTANCE, vec4(0.0f), vec3(0.0f));
     bool found = false;
+    int currentBone = 0;
+    TtmBonePose pose = TtmBonePose(vec4(0.0f, 0.0f, 0.0f, 1.0f), vec3(0.0f));
+    vec3 ws_boneOrigin = ws_rayOrigin;
+    vec3 ws_boneDirection = ws_rayDirection;
+
     for (int i = 0; i < ttmModel.r; i++) {
-        found = ttmTraceCube(i, ws_rayOrigin, ws_rayDirection, hit) || found;
+        ivec2 texelRow = ttmTexelOrigin + ivec2(0, i + 1);
+        ivec4 head = formatWord(texelRow);
+
+        if (head.b != currentBone) {
+            currentBone = head.b;
+            pose = currentBone == 0 ? TtmBonePose(vec4(0.0f, 0.0f, 0.0f, 1.0f), vec3(0.0f)) : ttmReadBonePose(currentBone);
+            vec4 conjugate = vec4(-pose.rotation.xyz, pose.rotation.w);
+            ws_boneOrigin = ttmRotate(conjugate, ws_rayOrigin - pose.position);
+            ws_boneDirection = ttmRotate(conjugate, ws_rayDirection);
+        }
+
+        if (ttmTraceCube(texelRow, head, ws_boneOrigin, ws_boneDirection, hit)) {
+            hit.ws_normal = ttmRotate(pose.rotation, hit.ws_normal);
+            found = true;
+        }
     }
     if (!found) return false;
 
