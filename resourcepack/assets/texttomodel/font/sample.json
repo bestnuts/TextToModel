@@ -13,6 +13,24 @@
       "height": 128,
       "ascent": 96,
       "chars": [""]
+    },
+    {
+      "type": "bitmap",
+      "file": "texttomodel:font/tiled.png",
+      "height": 128,
+      "ascent": 96,
+      "chars": ["", ""]
+    },
+    {
+      "type": "bitmap",
+      "file": "texttomodel:font/tiled_debug.png",
+      "height": 128,
+      "ascent": 96,
+      "chars": ["", ""]
+    },
+    {
+      "type": "space",
+      "advances": { "": -129 }
     }
   ]
 }
