@@ -31,8 +31,23 @@ uniform sampler2D Sampler0;
 #endif
 
 #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
+#include <minecraft:globals.glsl>
 layout(location = 4) flat out int ttmActive;
 layout(location = 5) out vec2 ttmLocal;
+layout(location = 6) flat out mat3 ttmRotation;
+
+// 모델 공간에서 화면 공간으로 가는 회전. M2 에서는 6초에 한 바퀴로 고정한다.
+mat3 ttmModelRotation() {
+    float yaw = fract(GameTime * 200.0) * 6.2831853;
+    float pitch = radians(25.0);
+    float cy = cos(yaw);
+    float sy = sin(yaw);
+    float cp = cos(pitch);
+    float sp = sin(pitch);
+    mat3 rotateY = mat3(cy, 0.0, -sy, 0.0, 1.0, 0.0, sy, 0.0, cy);
+    mat3 rotateX = mat3(1.0, 0.0, 0.0, 0.0, cp, sp, 0.0, -sp, cp);
+    return rotateX * rotateY;
+}
 #endif
 
 void main() {
@@ -50,6 +65,7 @@ void main() {
 #if defined(IS_GUI) && !defined(IS_GRAYSCALE)
     ttmActive = 0;
     ttmLocal = vec2(0.0);
+    ttmRotation = mat3(1.0);
 #endif
 
 #ifndef IS_GRAYSCALE
@@ -62,6 +78,7 @@ void main() {
         if (max(Color.r, max(Color.g, Color.b)) >= 0.26) {
             ttmActive = 1;
             ttmLocal = TTM_CORNER_LOCAL[ttmVertex];
+            ttmRotation = ttmModelRotation();
         } else {
             gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
         }
